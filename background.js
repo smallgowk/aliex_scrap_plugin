@@ -177,7 +177,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             });
                             const lazyCount = lazyCountRes && lazyCountRes[0] && lazyCountRes[0].result ? lazyCountRes[0].result : 0;
                             console.log(`[Crawl] After scroll ${tries + 1}, lazy-load items left: ${lazyCount}`);
-                            if (lazyCount === 0) break;
+                            if (lazyCount === 0) {
+                                // Sau khi hết lazy-load, tiếp tục scroll đến khi tìm thấy .hv_e5 (phân trang)
+                                let foundPaging = false;
+                                let pagingTries = 0;
+                                let maxPagingTries = 20;
+                                while (!foundPaging && pagingTries < maxPagingTries) {
+                                    const pagingRes = await chrome.scripting.executeScript({
+                                        target: { tabId },
+                                        func: () => {
+                                            return !!document.querySelector('div.hv_e5');
+                                        }
+                                    });
+                                    foundPaging = pagingRes && pagingRes[0] && pagingRes[0].result;
+                                    if (foundPaging) {
+                                        console.log('[Crawl] Found paging element <div class="hv_e5">');
+                                        break;
+                                    }
+                                    // Scroll xuống cuối trang thêm lần nữa
+                                    await chrome.scripting.executeScript({
+                                        target: { tabId },
+                                        func: () => {
+                                            window.scrollTo(0, document.body.scrollHeight);
+                                        }
+                                    });
+                                    await new Promise(resolve => setTimeout(resolve, 800));
+                                    pagingTries++;
+                                }
+                                break;
+                            }
                             tries++;
                         }
                         await new Promise(resolve => setTimeout(resolve, 500));
@@ -273,11 +301,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                 storePageInfo.currentPage = storePageDiv.getAttribute('currentpage');
                                 storePageInfo.totalpage = storePageDiv.getAttribute('totalpage');
                             }
-                            return { productIds, signature, isStore: !!storeA, countryFlag, language, storePageInfo };
+                            // Lấy totalPage cho search (không phải store)
+                            let searchTotalPage = null;
+                            if (!window.location.href.includes('/store/')) {
+                                const quickJumper = document.querySelector('.comet-pagination-options-quick-jumper');
+                                if (quickJumper) {
+                                    const textNodes = Array.from(quickJumper.childNodes).filter(n => n.nodeType === Node.TEXT_NODE);
+                                    let totalPageText = null;
+                                    for (const node of textNodes) {
+                                        const match = node.textContent.match(/\/(\d+)/);
+                                        if (match) {
+                                            totalPageText = match[1];
+                                            break;
+                                        }
+                                    }
+                                    if (!totalPageText) {
+                                        // fallback: lấy từ innerText
+                                        const m = quickJumper.innerText.match(/\/(\d+)/);
+                                        if (m) totalPageText = m[1];
+                                    }
+                                    if (totalPageText) searchTotalPage = totalPageText;
+                                }
+                            }
+                            return { productIds, signature, isStore: !!storeA, countryFlag, language, storePageInfo, searchTotalPage };
                         }
                     });
                     if (!isCrawlingAli) break;
-                    let { productIds, signature: sig, isStore: storeFlag, countryFlag, language, storePageInfo } = results && results[0] && results[0].result ? results[0].result : { productIds: [], signature: null, isStore: false, countryFlag: '', language: '', storePageInfo: { currentPage: null, totalpage: null } };
+                    let { productIds, signature: sig, isStore: storeFlag, countryFlag, language, storePageInfo, searchTotalPage } = results && results[0] && results[0].result ? results[0].result : { productIds: [], signature: null, isStore: false, countryFlag: '', language: '', storePageInfo: { currentPage: null, totalpage: null }, searchTotalPage: null };
                     // Chỉ ghép countryFlag và language vào signature một lần duy nhất
                     if (!signature && sig) signature = sig;
                     if (signature && countryFlag && language && !signature.match(/_[A-Z]{2}_[A-Z]{2}$/)) {
@@ -293,6 +343,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         if (storePageInfo.totalpage) totalPageValue = storePageInfo.totalpage;
                     } else if (!isStore) {
                         pageIndex = pageToCrawl;
+                        if (searchTotalPage) totalPageValue = searchTotalPage;
                     }
                     if (productIds.length === 0) {
                         // Nếu không còn sản phẩm nào thì dừng
@@ -319,7 +370,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             const now = Date.now();
                             const pageRef = db.ref(`aliexpress/${safeDiskSerial}/${signature}`);
                             let updateObj = { lastUpdate: now, type: crawlType };
-                            if (typeof totalPageValue !== 'undefined') updateObj.totalpage = totalPageValue;
+                            if (typeof totalPageValue !== 'undefined') {
+                                console.log('[TRACE] totalPageValue:', totalPageValue);
+                                updateObj.totalpage = totalPageValue;
+                            } else {
+                                console.log('[TRACE] totalPageValue is undefined');
+                            }
+                            console.log('[TRACE] updateObj before Firebase update:', updateObj);
                             await pageRef.update(updateObj);
                             await pageRef.child('pages').child(String(pageIndex)).set(productIds);
                         } catch (e) {
