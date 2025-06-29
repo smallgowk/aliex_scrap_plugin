@@ -114,20 +114,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 let totalSent = 0;
                 let crawlType = 'search';
                 let baseUrl = '';
-                if (!isStore) {
-                    // Lấy BASE_URL từ tab hiện tại, loại bỏ param page nếu có
-                    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-                    if (tab && tab.url) {
-                        let url = new URL(tab.url);
-                        url.searchParams.delete('page');
-                        baseUrl = url.toString();
-                    }
-                }
+                let isFirstPage = true;
                 while (isCrawlingAli) {
                     console.log(`[Crawl] Crawling page ${page}`);
                     chrome.runtime.sendMessage({ type: 'UPDATE_STATUS', data: { status: `Crawling page ${page}...`, isTaskRunning: true, currentPage: page } });
                     let pageToCrawl = page;
-                    if (!isStore && baseUrl) {
+                    if (isFirstPage) {
+                        // Xác định isStore dựa vào url hiện tại
+                        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                        if (tab && tab.url && tab.url.includes('/store/')) {
+                            isStore = true;
+                        } else {
+                            isStore = false;
+                        }
+                        if (!isStore) {
+                            // Lấy BASE_URL từ tab hiện tại, loại bỏ param page nếu có
+                            if (tab && tab.url) {
+                                let url = new URL(tab.url);
+                                url.searchParams.delete('page');
+                                baseUrl = url.toString();
+                            }
+                        }
+                        isFirstPage = false;
+                    }
+                    if (!isStore) {
                         // Tạo url mới với page param
                         let urlObj = new URL(baseUrl);
                         urlObj.searchParams.set('page', pageToCrawl);
@@ -175,17 +185,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     const results = await chrome.scripting.executeScript({
                         target: { tabId },
                         func: () => {
-                            // Get productIds
                             let productIds = [];
-                            const cardList = document.querySelector('div.hs_ht[data-spm="main"]#card-list');
-                            if (cardList) {
-                                const anchors = Array.from(cardList.querySelectorAll('a[href]'));
+                            if (window.location.href.includes('/store/')) {
+                                // STORE: lấy toàn bộ thẻ a trên trang
+                                const anchors = Array.from(document.querySelectorAll('a[href]'));
                                 const regex = /\.aliexpress\.com\/item\/(\d+)\.html/;
                                 const ids = anchors.map(a => {
                                     const m = a.getAttribute('href').match(regex);
                                     return m ? m[1] : null;
                                 }).filter(Boolean);
                                 productIds = Array.from(new Set(ids));
+                            } else {
+                                // SEARCH: chỉ lấy trong #card-list
+                                const cardList = document.querySelector('div.hs_ht[data-spm="main"]#card-list');
+                                if (cardList) {
+                                    const anchors = Array.from(cardList.querySelectorAll('a[href]'));
+                                    const regex = /\.aliexpress\.com\/item\/(\d+)\.html/;
+                                    const ids = anchors.map(a => {
+                                        const m = a.getAttribute('href').match(regex);
+                                        return m ? m[1] : null;
+                                    }).filter(Boolean);
+                                    productIds = Array.from(new Set(ids));
+                                }
                             }
                             // Get signature
                             let signature = null;
@@ -322,22 +343,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                 return false;
                             }
                         });
-                        if (!isCrawlingAli) break;
                         hasNext = nextRes && nextRes[0] && nextRes[0].result;
                     } else {
-                        const nextRes = await chrome.scripting.executeScript({
-                            target: { tabId },
-                            func: () => {
-                                const btn = Array.from(document.querySelectorAll('button.comet-pagination-item-link')).find(b => !b.disabled);
-                                if (btn) {
-                                    btn.click();
-                                    return true;
-                                }
-                                return false;
-                            }
-                        });
-                        if (!isCrawlingAli) break;
-                        hasNext = nextRes && nextRes[0] && nextRes[0].result;
+                        hasNext = true; // search query luôn tăng page cho đến khi không còn sản phẩm
                     }
                     if (!hasNext && isStore) break;
                     await new Promise(resolve => setTimeout(resolve, 2000));
