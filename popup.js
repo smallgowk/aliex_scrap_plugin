@@ -102,12 +102,17 @@ function initializeExtension() {
             try {
                 const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
                 if (!tab || !tab.id) throw new Error('Cannot find current tab');
-                const teamInput = document.getElementById('sheetNameInput');
-                const team = teamInput && teamInput.value ? teamInput.value : 'trung';
+                const diskSerialInput = document.getElementById('sheetNameInput');
+                const diskSerialNumber = diskSerialInput && diskSerialInput.value ? diskSerialInput.value.trim() : '';
+                if (!diskSerialNumber) {
+                    crawlStatus.textContent = 'Disk Serial Number must not be empty!';
+                    updateButtonState(false);
+                    return;
+                }
                 // Send new message to background
                 const response = await chrome.runtime.sendMessage({
                     type: 'CRAWL_ALIEX_PRODUCTS',
-                    team,
+                    diskSerialNumber,
                     tabId: tab.id
                 });
                 if (response && response.success === false) {

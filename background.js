@@ -1,3 +1,6 @@
+importScripts('firebase/firebase-app-compat.js');
+importScripts('firebase/firebase-database-compat.js');
+
 // Background script - Removed Auto-rerun functionality
 let isCrawling = false;
 let currentTabId = null;
@@ -7,6 +10,28 @@ let isTaskRunning = false;
 let lastTrackingMessage = null;
 let isCrawlingAli = false;
 let currentCrawlingPage = 1;
+
+// Firebase config
+const firebaseConfig = {
+  apiKey: "AIzaSyA4DMIabySBRKXkO4t2w6_Tsx-MgyHG0UA",
+  authDomain: "drop-aliex.firebaseapp.com",
+  databaseURL: "https://drop-aliex-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "drop-aliex",
+  storageBucket: "drop-aliex.firebasestorage.app",
+  messagingSenderId: "441164202735",
+  appId: "1:441164202735:web:b446ef04a91ebe20b4111a",
+  measurementId: "G-8F4NJR3KQN"
+};
+let firebaseApp = null;
+let firebaseDatabase = null;
+
+async function ensureFirebase() {
+    if (!firebaseApp) {
+        firebaseApp = firebase.initializeApp(firebaseConfig);
+        firebaseDatabase = firebase.database();
+    }
+    return firebaseDatabase;
+}
 
 // Function to reset crawling state
 function resetCrawlingState() {
@@ -72,29 +97,96 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ success: false, message: 'A crawling task is already running.' });
             return true;
         }
+        const { diskSerialNumber, tabId } = message;
+        if (!diskSerialNumber) {
+            sendResponse({ success: false, message: 'Disk Serial Number must not be empty!' });
+            chrome.runtime.sendMessage({ type: 'UPDATE_STATUS', data: { status: 'Disk Serial Number must not be empty!', isTaskRunning: false, currentPage: 1 } });
+            return true;
+        }
         (async () => {
             try {
                 isCrawlingAli = true;
                 currentCrawlingPage = 1;
-                const { team, tabId } = message;
                 let allProductIds = [];
                 let signature = null;
                 let page = 1;
                 let isStore = false;
                 let totalSent = 0;
+                let crawlType = 'search';
+                let baseUrl = '';
+                if (!isStore) {
+                    // Lấy BASE_URL từ tab hiện tại, loại bỏ param page nếu có
+                    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                    if (tab && tab.url) {
+                        let url = new URL(tab.url);
+                        url.searchParams.delete('page');
+                        baseUrl = url.toString();
+                    }
+                }
                 while (isCrawlingAli) {
+                    console.log(`[Crawl] Crawling page ${page}`);
                     chrome.runtime.sendMessage({ type: 'UPDATE_STATUS', data: { status: `Crawling page ${page}...`, isTaskRunning: true, currentPage: page } });
+                    let pageToCrawl = page;
+                    if (!isStore && baseUrl) {
+                        // Tạo url mới với page param
+                        let urlObj = new URL(baseUrl);
+                        urlObj.searchParams.set('page', pageToCrawl);
+                        await new Promise(resolve => {
+                            chrome.tabs.update(tabId, { url: urlObj.toString() }, () => resolve());
+                        });
+                        // Đợi trang load xong (polling)
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        // Scroll nhiều lần, dừng khi không còn item lazy-load
+                        let tries = 0;
+                        let maxTries = 30;
+                        while (tries < maxTries) {
+                            console.log(`[Crawl] Scroll attempt ${tries + 1} for page ${page}`);
+                            await chrome.scripting.executeScript({
+                                target: { tabId },
+                                func: () => {
+                                    // Scroll đến item cuối cùng có class hs_bu search-item-card-wrapper-gallery
+                                    const items = document.querySelectorAll('div.hs_bu.search-item-card-wrapper-gallery');
+                                    if (items && items.length > 0) {
+                                        items[items.length - 1].scrollIntoView({ behavior: 'smooth', block: 'end' });
+                                    } else {
+                                        window.scrollTo(0, document.body.scrollHeight);
+                                    }
+                                }
+                            });
+                            await new Promise(resolve => setTimeout(resolve, 1000));
+                            // Kiểm tra còn item lazy-load không
+                            let lazyCountRes = await chrome.scripting.executeScript({
+                                target: { tabId },
+                                func: () => {
+                                    const cardList = document.querySelector('div.hs_ht[data-spm="main"]#card-list');
+                                    if (cardList) {
+                                        return Array.from(cardList.children).filter(e => e.classList.contains('lazy-load')).length;
+                                    }
+                                    return 0;
+                                }
+                            });
+                            const lazyCount = lazyCountRes && lazyCountRes[0] && lazyCountRes[0].result ? lazyCountRes[0].result : 0;
+                            console.log(`[Crawl] After scroll ${tries + 1}, lazy-load items left: ${lazyCount}`);
+                            if (lazyCount === 0) break;
+                            tries++;
+                        }
+                        await new Promise(resolve => setTimeout(resolve, 500));
+                    }
                     const results = await chrome.scripting.executeScript({
                         target: { tabId },
                         func: () => {
                             // Get productIds
-                            const anchors = Array.from(document.querySelectorAll('a[href]'));
-                            const regex = /\.aliexpress\.com\/item\/(\d+)\.html/;
-                            const ids = anchors.map(a => {
-                                const m = a.getAttribute('href').match(regex);
-                                return m ? m[1] : null;
-                            }).filter(Boolean);
-                            const productIds = Array.from(new Set(ids));
+                            let productIds = [];
+                            const cardList = document.querySelector('div.hs_ht[data-spm="main"]#card-list');
+                            if (cardList) {
+                                const anchors = Array.from(cardList.querySelectorAll('a[href]'));
+                                const regex = /\.aliexpress\.com\/item\/(\d+)\.html/;
+                                const ids = anchors.map(a => {
+                                    const m = a.getAttribute('href').match(regex);
+                                    return m ? m[1] : null;
+                                }).filter(Boolean);
+                                productIds = Array.from(new Set(ids));
+                            }
                             // Get signature
                             let signature = null;
                             // 1. Try to find a[data-href*=".aliexpress.com/store/"]
@@ -115,18 +207,81 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                     signature = input.value.trim().toLowerCase().replace(/\s+/g, '_');
                                 }
                             }
-                            return { productIds, signature, isStore: !!storeA };
+                            // Lấy country flag và language
+                            let countryFlag = '';
+                            let language = '';
+                            const shipTo = document.querySelector('.ship-to--menuItem--WdBDsYl');
+                            if (shipTo) {
+                                const flagSpan = shipTo.querySelector('span[class*="country-flag-"]');
+                                if (flagSpan) {
+                                    const classList = Array.from(flagSpan.classList);
+                                    // Tìm class bắt đầu bằng 'country-flag-' và lấy phần sau cùng (thường là US)
+                                    const flagClass = classList.find(cls => cls.startsWith('country-flag-'));
+                                    if (flagClass) {
+                                        const parts = flagClass.split(' ');
+                                        countryFlag = parts[parts.length - 1].replace('country-flag-', '').toUpperCase();
+                                        // Nếu vẫn chưa đúng, thử lấy phần tử cuối cùng của classList nếu nó là 2 ký tự
+                                        if (!countryFlag || countryFlag.length !== 2) {
+                                            const last = classList[classList.length - 1];
+                                            if (last.length === 2) countryFlag = last.toUpperCase();
+                                        }
+                                    } else {
+                                        // fallback lấy phần tử cuối cùng nếu là 2 ký tự
+                                        const last = classList[classList.length - 1];
+                                        if (last.length === 2) countryFlag = last.toUpperCase();
+                                    }
+                                }
+                                const langSpan = shipTo.querySelector('.ship-to--small--1wG1oGl');
+                                if (langSpan) {
+                                    const langText = langSpan.textContent || '';
+                                    // Lấy 2 ký tự in hoa cuối cùng trước dấu /
+                                    const match = langText.match(/\/([A-Z]{2})\//);
+                                    if (match) {
+                                        language = match[1];
+                                    } else {
+                                        // fallback: lấy 2 ký tự in hoa cuối cùng
+                                        const fallback = langText.match(/([A-Z]{2})\/?$/);
+                                        if (fallback) language = fallback[1];
+                                    }
+                                }
+                            }
+                            // Lấy currentPage và totalpage nếu là store
+                            let storePageInfo = { currentPage: null, totalpage: null };
+                            const storePageDiv = document.querySelector('div[currentpage][totalpage]');
+                            if (storePageDiv) {
+                                storePageInfo.currentPage = storePageDiv.getAttribute('currentpage');
+                                storePageInfo.totalpage = storePageDiv.getAttribute('totalpage');
+                            }
+                            return { productIds, signature, isStore: !!storeA, countryFlag, language, storePageInfo };
                         }
                     });
                     if (!isCrawlingAli) break;
-                    const { productIds, signature: sig, isStore: storeFlag } = results && results[0] && results[0].result ? results[0].result : { productIds: [], signature: null, isStore: false };
+                    let { productIds, signature: sig, isStore: storeFlag, countryFlag, language, storePageInfo } = results && results[0] && results[0].result ? results[0].result : { productIds: [], signature: null, isStore: false, countryFlag: '', language: '', storePageInfo: { currentPage: null, totalpage: null } };
+                    // Chỉ ghép countryFlag và language vào signature một lần duy nhất
                     if (!signature && sig) signature = sig;
+                    if (signature && countryFlag && language && !signature.match(/_[A-Z]{2}_[A-Z]{2}$/)) {
+                        signature = `${signature}_${countryFlag}_${language}`;
+                    }
                     isStore = storeFlag;
+                    crawlType = isStore ? 'store' : 'search';
+                    // Xác định pageIndex để update Firebase
+                    let pageIndex = page;
+                    let totalPageValue = undefined;
+                    if (isStore && storePageInfo && storePageInfo.currentPage) {
+                        pageIndex = storePageInfo.currentPage;
+                        if (storePageInfo.totalpage) totalPageValue = storePageInfo.totalpage;
+                    } else if (!isStore) {
+                        pageIndex = pageToCrawl;
+                    }
+                    if (productIds.length === 0) {
+                        // Nếu không còn sản phẩm nào thì dừng
+                        break;
+                    }
                     if (productIds.length && signature) {
                         const apiRes = await fetch('http://iamhere.vn:89/api/ggsheet/pushAliexProducts', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ signature, listProducts: productIds })
+                            body: JSON.stringify({ signature, listProducts: productIds, diskSerialNumber })
                         });
                         if (!isCrawlingAli) break;
                         if (!apiRes.ok) {
@@ -136,6 +291,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             return;
                         }
                         totalSent += productIds.length;
+                        // Update Firebase
+                        try {
+                            const db = await ensureFirebase();
+                            const safeDiskSerial = diskSerialNumber.replace(/\./g, '_dot_');
+                            const now = Date.now();
+                            const pageRef = db.ref(`aliexpress/${safeDiskSerial}/${signature}`);
+                            let updateObj = { lastUpdate: now, type: crawlType };
+                            if (typeof totalPageValue !== 'undefined') updateObj.totalpage = totalPageValue;
+                            await pageRef.update(updateObj);
+                            await pageRef.child('pages').child(String(pageIndex)).set(productIds);
+                        } catch (e) {
+                            // ignore firebase error, just log
+                            console.error('Firebase update error:', e);
+                        }
                     }
                     allProductIds.push(...productIds);
                     let hasNext = false;
@@ -170,7 +339,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         if (!isCrawlingAli) break;
                         hasNext = nextRes && nextRes[0] && nextRes[0].result;
                     }
-                    if (!hasNext) break;
+                    if (!hasNext && isStore) break;
                     await new Promise(resolve => setTimeout(resolve, 2000));
                     if (!isCrawlingAli) break;
                     page++;
