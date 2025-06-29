@@ -1,0 +1,146 @@
+body {
+    width: 400px;
+    padding: 20px;
+    font-family: Arial, sans-serif;
+}
+
+.container {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+h1 {
+    font-size: 20px;
+    margin: 0;
+    color: #333;
+    text-align: center;
+}
+
+.url-input {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.url-input input[type="text"] {
+    padding: 8px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.file-selector {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+label {
+    font-weight: bold;
+    color: #555;
+}
+
+input[type="file"] {
+    padding: 8px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    background-color: #f9f9f9;
+}
+
+button {
+    padding: 10px 15px;
+    background-color: #4285f4;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+    transition: background-color 0.2s;
+}
+
+button:hover {
+    background-color: #3367d6;
+}
+
+button:disabled {
+    background-color: #ccc;
+    cursor: not-allowed;
+}
+
+.file-name {
+    font-size: 12px;
+    color: #666;
+    margin-top: 4px;
+    word-break: break-all;
+}
+
+.status-message {
+    font-size: 12px;
+    color: #666;
+    margin-top: 4px;
+    min-height: 16px;
+}
+
+#processButton {
+    margin-top: 10px;
+    width: 100%;
+}
+
+#crawlButton {
+    width: 100%;
+    margin-top: 8px;
+}
+
+/* Switch button styles */
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+}
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #ccc;
+  transition: .4s;
+  border-radius: 24px;
+}
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background-color: white;
+  transition: .4s;
+  border-radius: 50%;
+}
+input:checked + .slider {
+  background-color: #4285f4;
+}
+input:checked + .slider:before {
+  transform: translateX(20px);
+}
+.switch-label {
+  margin-left: 8px;
+  font-size: 14px;
+  color: #333;
+  font-weight: 500;
+}
+.flex-row-center {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+} 
