@@ -1,6 +1,3 @@
-importScripts('firebase/firebase-app-compat.js');
-importScripts('firebase/firebase-database-compat.js');
-
 // Background script - Removed Auto-rerun functionality
 let isCrawling = false;
 let currentTabId = null;
@@ -10,36 +7,6 @@ let isTaskRunning = false;
 let lastTrackingMessage = null;
 let isCrawlingAli = false;
 let currentCrawlingPage = 1;
-
-// Firebase config
-const firebaseConfig = {
-  apiKey: "AIzaSyA4DMIabySBRKXkO4t2w6_Tsx-MgyHG0UA",
-  authDomain: "drop-aliex.firebaseapp.com",
-  databaseURL: "https://drop-aliex-default-rtdb.asia-southeast1.firebasedatabase.app",
-  projectId: "drop-aliex",
-  storageBucket: "drop-aliex.firebasestorage.app",
-  messagingSenderId: "441164202735",
-  appId: "1:441164202735:web:b446ef04a91ebe20b4111a",
-  measurementId: "G-8F4NJR3KQN"
-};
-let firebaseApp = null;
-let firebaseDatabase = null;
-
-async function ensureFirebase() {
-    if (!firebaseApp) {
-        firebaseApp = firebase.initializeApp(firebaseConfig);
-        firebaseDatabase = firebase.database();
-    }
-    return firebaseDatabase;
-}
-
-// Function to reset crawling state
-function resetCrawlingState() {
-    isCrawling = false;
-    currentTabId = null;
-    crawledItemIds.clear();
-    pageCount = 0;
-}
 
 // Listen for messages from popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -353,7 +320,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         const apiRes = await fetch('http://iamhere.vn:89/api/ggsheet/pushAliexProducts', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ signature, listProducts: productIds, diskSerialNumber })
+                            body: JSON.stringify({ 
+                                signature, 
+                                listProducts: productIds, 
+                                diskSerialNumber,
+                                totalPage: totalPageValue,
+                                pageNumber: pageIndex
+                            })
                         });
                         if (!isCrawlingAli) break;
                         if (!apiRes.ok) {
@@ -363,26 +336,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             return;
                         }
                         totalSent += productIds.length;
-                        // Update Firebase
-                        try {
-                            const db = await ensureFirebase();
-                            const safeDiskSerial = diskSerialNumber.replace(/\./g, '_dot_');
-                            const now = Date.now();
-                            const pageRef = db.ref(`aliexpress/${safeDiskSerial}/${signature}`);
-                            let updateObj = { lastUpdate: now, type: crawlType };
-                            if (typeof totalPageValue !== 'undefined') {
-                                console.log('[TRACE] totalPageValue:', totalPageValue);
-                                updateObj.totalpage = totalPageValue;
-                            } else {
-                                console.log('[TRACE] totalPageValue is undefined');
-                            }
-                            console.log('[TRACE] updateObj before Firebase update:', updateObj);
-                            await pageRef.update(updateObj);
-                            await pageRef.child('pages').child(String(pageIndex)).set(productIds);
-                        } catch (e) {
-                            // ignore firebase error, just log
-                            console.error('Firebase update error:', e);
-                        }
                     }
                     allProductIds.push(...productIds);
                     let hasNext = false;
@@ -633,4 +586,12 @@ async function handleFetchTracking(message, sender, sendResponse) {
         chrome.runtime.sendMessage({ type: 'CRAWL_ERROR', error: error.message });
         chrome.runtime.sendMessage({ type: 'UPDATE_STATUS', data: currentTrackingStatus });
     }
+}
+
+// Function to reset crawling state
+function resetCrawlingState() {
+    isCrawling = false;
+    currentTabId = null;
+    crawledItemIds.clear();
+    pageCount = 0;
 }
