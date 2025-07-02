@@ -219,12 +219,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                 target: { tabId },
                                 func: () => {
                                     // Scroll đến item cuối cùng có class hs_bu search-item-card-wrapper-gallery
-                                    const items = document.querySelectorAll('div.hs_bu.search-item-card-wrapper-gallery');
+                                    const items = document.querySelectorAll('div.lazy-load');
                                     if (items && items.length > 0) {
                                         items[items.length - 1].scrollIntoView({ behavior: 'smooth', block: 'end' });
-                                    } else {
-                                        window.scrollTo(0, document.body.scrollHeight);
-                                    }
+                                    } 
+                                    // else {
+                                    //     window.scrollTo(0, document.body.scrollHeight);
+                                    // }
                                 }
                             });
                             await new Promise(resolve => setTimeout(resolve, 1000));
@@ -232,9 +233,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             let lazyCountRes = await chrome.scripting.executeScript({
                                 target: { tabId },
                                 func: () => {
-                                    const cardList = document.querySelector('div.hs_ht[data-spm="main"]#card-list');
-                                    if (cardList) {
-                                        return Array.from(cardList.children).filter(e => e.classList.contains('lazy-load')).length;
+                                    const items = document.querySelectorAll('div.lazy-load');
+                                    if (items) {
+                                        return items.length;
                                     }
                                     return 0;
                                 }
@@ -414,6 +415,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         break;
                     }
                     if (productIds.length && signature) {
+                        console.log('[pushAliexProducts] Payload:', {
+                            signature, 
+                            listProducts: productIds, 
+                            diskSerialNumber: diskSerialNumber,
+                            totalPage: totalPageValue,
+                            pageNumber: pageIndex
+                        });
                         const apiRes = await fetch('http://iamhere.vn:89/api/ggsheet/pushAliexProducts', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
