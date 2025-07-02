@@ -189,7 +189,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             if (checkRes.ok) {
                                 const checkData = await checkRes.json();
                                 if (checkData && Array.isArray(checkData.data) && checkData.data.length > 0) {
-                                    console.log(`[Crawl] Page ${page} đã có dữ liệu, skip sang trang tiếp theo.`);
+                                    console.log(`[Crawl] Page ${page} đã có dữ liệu, gửi pushedData và skip sang trang tiếp theo.`);
+                                    await fetch('http://iamhere.vn:89/api/v1/websocket/pushedData', {
+                                        method: 'POST',
+                                        headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({
+                                            diskSerialNumber: diskSerialNumber,
+                                            signature: tempSignature,
+                                            pageNumber: page
+                                        })
+                                    });
                                     page++;
                                     currentCrawlingPage = page;
                                     continue;
