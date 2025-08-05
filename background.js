@@ -115,13 +115,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             func: () => {
                                 // Lấy signature như logic cũ
                                 let signature = null;
-                                const storeA = Array.from(document.querySelectorAll('a[data-href*=".aliexpress.com/store/"]')).find(a => {
-                                    const m = a.getAttribute('data-href').match(/\.aliexpress\.com\/store\/(\d+)/);
-                                    return m;
-                                });
-                                if (storeA) {
-                                    const m = storeA.getAttribute('data-href').match(/\.aliexpress\.com\/store\/(\d+)/);
-                                    const storeId = m[1];
+                                                                 const storeA = Array.from(document.querySelectorAll('a[data-href*=".aliexpress."]')).find(a => {
+                                     const m = a.getAttribute('data-href').match(/\/\/[^\/]*\.aliexpress\.[a-z0-9.-]+\/store\/(\d+)/);
+                                     return m;
+                                 });
+                                 if (storeA) {
+                                     const m = storeA.getAttribute('data-href').match(/\/\/[^\/]*\.aliexpress\.[a-z0-9.-]+\/store\/(\d+)/);
+                                     const storeId = m[1];
                                     let text = storeA.innerText || storeA.textContent || '';
                                     text = text.trim().toLowerCase().replace(/\s+/g, '_');
                                     signature = `${storeId}_${text}`;
@@ -177,7 +177,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     // Kiểm tra API getAliexProducts trước khi crawl trang này
                     if (tempSignature && diskSerialNumber && page > 0) {
                         try {
-                            const checkRes = await fetch('http://iamhere.vn:89/api/ggsheet/getAliexProducts', {
+                            const checkRes = await fetch('http://iamhere.vn:8089/api/ggsheet/getAliexProducts', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({
@@ -190,7 +190,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                 const checkData = await checkRes.json();
                                 if (checkData && Array.isArray(checkData.data) && checkData.data.length > 0) {
                                     console.log(`[Crawl] Page ${page} đã có dữ liệu, gửi pushedData và skip sang trang tiếp theo.`);
-                                    await fetch('http://iamhere.vn:89/api/v1/websocket/pushedData', {
+                                    await fetch('http://iamhere.vn:8089/api/v1/websocket/pushedData', {
                                         method: 'POST',
                                         headers: { 'Content-Type': 'application/json' },
                                         body: JSON.stringify({
@@ -252,7 +252,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             const lazyCount = lazyCountRes && lazyCountRes[0] && lazyCountRes[0].result ? lazyCountRes[0].result : 0;
                             console.log(`[Crawl] After scroll ${tries + 1}, lazy-load items left: ${lazyCount}`);
                             if (lazyCount === 0) {
-                                // Sau khi hết lazy-load, tiếp tục scroll đến khi tìm thấy .hv_e5 (phân trang)
+                                // Sau khi hết lazy-load, tiếp tục scroll đến khi tìm thấy ul.comet-pagination (phân trang)
                                 let foundPaging = false;
                                 let pagingTries = 0;
                                 let maxPagingTries = 20;
@@ -260,12 +260,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                     const pagingRes = await chrome.scripting.executeScript({
                                         target: { tabId },
                                         func: () => {
-                                            return !!document.querySelector('div.hv_e5');
+                                            return !!document.querySelector('ul.comet-pagination');
                                         }
                                     });
-                                    foundPaging = pagingRes && pagingRes[0] && pagingRes[0].result;
+                                    // foundPaging = pagingRes && pagingRes[0] && pagingRes[0].result;
+                                    foundPaging = pagingRes;
                                     if (foundPaging) {
-                                        console.log('[Crawl] Found paging element <div class="hv_e5">');
+                                        console.log('[Crawl] Found paging element <ul class="comet-pagination">');
                                         break;
                                     }
                                     // Scroll xuống cuối trang thêm lần nữa
@@ -284,6 +285,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         }
                         await new Promise(resolve => setTimeout(resolve, 500));
                     }
+                    // Thêm delay để đảm bảo trang load đầy đủ sau khi scroll
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                    console.log(`[Crawl] Starting to extract product IDs for page ${page}`);
                     const results = await chrome.scripting.executeScript({
                         target: { tabId },
                         func: () => {
@@ -291,7 +295,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             if (window.location.href.includes('/store/')) {
                                 // STORE: lấy toàn bộ thẻ a trên trang
                                 const anchors = Array.from(document.querySelectorAll('a[href]'));
-                                const regex = /\.aliexpress\.com\/item\/(\d+)\.html/;
+                                const regex = /\/\/[^\/]*\.aliexpress\.[a-z0-9.-]+\/item\/(\d+)\.html/;
                                 const ids = anchors.map(a => {
                                     const m = a.getAttribute('href').match(regex);
                                     return m ? m[1] : null;
@@ -299,26 +303,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                 productIds = Array.from(new Set(ids));
                             } else {
                                 // SEARCH: chỉ lấy trong #card-list
-                                const cardList = document.querySelector('div.hs_ht[data-spm="main"]#card-list');
+                                const cardList = document.querySelector('div[data-spm="main"]#card-list');
                                 if (cardList) {
+                                    console.log(`[cardList] found!`);
                                     const anchors = Array.from(cardList.querySelectorAll('a[href]'));
-                                    const regex = /\.aliexpress\.com\/item\/(\d+)\.html/;
+                                    console.log(`[Link found] ${anchors.length}!`);
+                                    const regex = /\/\/[^\/]*\.aliexpress\.[a-z0-9.-]+\/item\/(\d+)\.html/;
                                     const ids = anchors.map(a => {
                                         const m = a.getAttribute('href').match(regex);
                                         return m ? m[1] : null;
                                     }).filter(Boolean);
+                                    console.log(`[ID found] ${ids.length}!`);
                                     productIds = Array.from(new Set(ids));
+                                } else {
+                                    console.log(`[cardList] not found!`);
                                 }
                             }
                             // Get signature
                             let signature = null;
-                            // 1. Try to find a[data-href*=".aliexpress.com/store/"]
-                            const storeA = Array.from(document.querySelectorAll('a[data-href*=".aliexpress.com/store/"]')).find(a => {
-                                const m = a.getAttribute('data-href').match(/\.aliexpress\.com\/store\/(\d+)/);
+                            // 1. Try to find any aliexpress store link
+                            const storeA = Array.from(document.querySelectorAll('a[data-href*=".aliexpress."]')).find(a => {
+                                const m = a.getAttribute('data-href').match(/\/\/[^\/]*\.aliexpress\.[a-z0-9.-]+\/store\/(\d+)/);
                                 return m;
                             });
                             if (storeA) {
-                                const m = storeA.getAttribute('data-href').match(/\.aliexpress\.com\/store\/(\d+)/);
+                                const m = storeA.getAttribute('data-href').match(/\/\/[^\/]*\.aliexpress\.[a-z0-9.-]+\/store\/(\d+)/);
                                 const storeId = m[1];
                                 let text = storeA.innerText || storeA.textContent || '';
                                 text = text.trim().toLowerCase().replace(/\s+/g, '_');
@@ -380,6 +389,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             if (!window.location.href.includes('/store/')) {
                                 const quickJumper = document.querySelector('.comet-pagination-options-quick-jumper');
                                 if (quickJumper) {
+                                    // Tìm text node chứa "/60" hoặc tương tự
                                     const textNodes = Array.from(quickJumper.childNodes).filter(n => n.nodeType === Node.TEXT_NODE);
                                     let totalPageText = null;
                                     for (const node of textNodes) {
@@ -431,7 +441,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             totalPage: totalPageValue,
                             pageNumber: pageIndex
                         });
-                        const apiRes = await fetch('http://iamhere.vn:89/api/ggsheet/pushAliexProducts', {
+                        const apiRes = await fetch('http://iamhere.vn:8089/api/ggsheet/pushAliexProducts', {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ 
@@ -469,9 +479,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         });
                         hasNext = nextRes && nextRes[0] && nextRes[0].result;
                     } else {
-                        hasNext = true; // search query luôn tăng page cho đến khi không còn sản phẩm
+                        // Kiểm tra xem có trang tiếp theo không dựa trên cấu trúc phân trang mới
+                        const nextPageRes = await chrome.scripting.executeScript({
+                            target: { tabId },
+                            func: () => {
+                                // Kiểm tra xem có nút "next" không bị disabled
+                                const nextButton = document.querySelector('.comet-pagination-next:not(.comet-pagination-disabled)');
+                                if (nextButton) {
+                                    return true;
+                                }
+                                // Kiểm tra xem có trang tiếp theo trong danh sách không
+                                const currentPage = document.querySelector('.comet-pagination-item-active');
+                                if (currentPage) {
+                                    const currentPageNumber = parseInt(currentPage.textContent);
+                                    const allPageItems = Array.from(document.querySelectorAll('.comet-pagination-item'));
+                                    const maxPageNumber = Math.max(...allPageItems.map(item => {
+                                        const num = parseInt(item.textContent);
+                                        return isNaN(num) ? 0 : num;
+                                    }));
+                                    return currentPageNumber < maxPageNumber;
+                                }
+                                return false;
+                            }
+                        });
+                        hasNext = nextPageRes && nextPageRes[0] && nextPageRes[0].result;
                     }
-                    if (!hasNext && isStore) break;
+                    if (!hasNext) break;
                     await new Promise(resolve => setTimeout(resolve, 2000));
                     if (!isCrawlingAli) break;
                     page++;
@@ -620,7 +653,7 @@ async function startCrawling(tabId) {
 }
 
 async function handleFetchTracking(message, sender, sendResponse) {
-    const BASE_API_URL = 'http://iamhere.vn:89/api/ggsheet';
+    const BASE_API_URL = 'http://iamhere.vn:8089/api/ggsheet';
     const { sheetId, sheetName, tabId } = message;
     try {
         currentTrackingStatus = { currentPage: 0, totalItems: 0, status: 'Fetching orderId list from Google Sheet...', isTaskRunning: true };
