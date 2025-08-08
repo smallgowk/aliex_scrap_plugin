@@ -175,39 +175,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     }
 
                     // Kiểm tra API getAliexProducts trước khi crawl trang này
-                    if (tempSignature && diskSerialNumber && page > 0) {
-                        try {
-                            const checkRes = await fetch('http://iamhere.vn:8089/api/ggsheet/getAliexProducts', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    diskSerialNumber: diskSerialNumber,
-                                    signature: tempSignature,
-                                    pageNumber: page
-                                })
-                            });
-                            if (checkRes.ok) {
-                                const checkData = await checkRes.json();
-                                if (checkData && Array.isArray(checkData.data) && checkData.data.length > 0) {
-                                    console.log(`[Crawl] Page ${page} đã có dữ liệu, gửi pushedData và skip sang trang tiếp theo.`);
-                                    await fetch('http://iamhere.vn:8089/api/v1/websocket/pushedData', {
-                                        method: 'POST',
-                                        headers: { 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({
-                                            diskSerialNumber: diskSerialNumber,
-                                            signature: tempSignature,
-                                            pageNumber: page
-                                        })
-                                    });
-                                    page++;
-                                    currentCrawlingPage = page;
-                                    continue;
-                                }
-                            }
-                        } catch (err) {
-                            console.warn('[Crawl] Lỗi khi gọi getAliexProducts:', err);
-                        }
-                    }
+                    // if (tempSignature && diskSerialNumber && page > 0) {
+                    //     try {
+                    //         const checkRes = await fetch('http://iamhere.vn:8089/api/ggsheet/getAliexProducts', {
+                    //             method: 'POST',
+                    //             headers: { 'Content-Type': 'application/json' },
+                    //             body: JSON.stringify({
+                    //                 diskSerialNumber: diskSerialNumber,
+                    //                 signature: tempSignature,
+                    //                 pageNumber: page
+                    //             })
+                    //         });
+                    //         if (checkRes.ok) {
+                    //             const checkData = await checkRes.json();
+                    //             if (checkData && Array.isArray(checkData.data) && checkData.data.length > 0) {
+                    //                 console.log(`[Crawl] Page ${page} đã có dữ liệu, gửi pushedData và skip sang trang tiếp theo.`);
+                    //                 await fetch('http://iamhere.vn:8089/api/v1/websocket/pushedData', {
+                    //                     method: 'POST',
+                    //                     headers: { 'Content-Type': 'application/json' },
+                    //                     body: JSON.stringify({
+                    //                         diskSerialNumber: diskSerialNumber,
+                    //                         signature: tempSignature,
+                    //                         pageNumber: page
+                    //                     })
+                    //                 });
+                    //                 page++;
+                    //                 currentCrawlingPage = page;
+                    //                 continue;
+                    //             }
+                    //         }
+                    //     } catch (err) {
+                    //         console.warn('[Crawl] Lỗi khi gọi getAliexProducts:', err);
+                    //     }
+                    // }
 
                     let pageToCrawl = page;
                     if (!isStore) {
