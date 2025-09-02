@@ -11,6 +11,35 @@ let currentCrawlingPage = 1;
 const DOMAIN = 'https://iamhere.vn/';
 // const DOMAIN = 'http://localhost:8089/';
 
+// Helper functions for saving/loading crawl state
+async function saveCrawlState(state) {
+    try {
+        await chrome.storage.local.set({ crawlState: state });
+        console.log('[Crawl] State saved:', state);
+    } catch (error) {
+        console.error('[Crawl] Error saving state:', error);
+    }
+}
+
+async function loadCrawlState() {
+    try {
+        const result = await chrome.storage.local.get(['crawlState']);
+        return result.crawlState || null;
+    } catch (error) {
+        console.error('[Crawl] Error loading state:', error);
+        return null;
+    }
+}
+
+async function clearCrawlState() {
+    try {
+        await chrome.storage.local.remove(['crawlState']);
+        console.log('[Crawl] State cleared');
+    } catch (error) {
+        console.error('[Crawl] Error clearing state:', error);
+    }
+}
+
 // Listen for messages from popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'START_CRAWL') {
@@ -52,13 +81,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ success: true });
         return true;
     } else if (message.type === 'STOP_FETCH_TRACKING' || message.type === 'STOP_CRAWL_ALIEX_PRODUCTS') {
+        console.log('[Crawl] Stop message received, setting isCrawlingAli = false');
         isTaskRunning = false;
         isCrawlingAli = false;
         currentCrawlingPage = 1;
         currentTrackingStatus = { ...currentTrackingStatus, isTaskRunning: false };
+        clearCrawlState(); // Clear saved state when stopping
         chrome.runtime.sendMessage({ type: 'UPDATE_STATUS', data: { ...currentTrackingStatus, status: 'Stopped by user.', isTaskRunning: false, currentPage: currentCrawlingPage } });
+        console.log('[Crawl] Stop completed, isCrawlingAli =', isCrawlingAli);
         sendResponse({ success: true });
-        return true;
+    } else if (message.type === 'GET_CRAWL_STATE') {
+        // Return current crawl state to popup
+        loadCrawlState().then(state => {
+            sendResponse({ 
+                success: true, 
+                state: state,
+                isCrawling: isCrawlingAli
+            });
+        });
+        return true; // Keep message channel open for async response
     } else if (message.type === 'GET_CURRENT_STATUS') {
         sendResponse({ ...currentTrackingStatus, isTaskRunning: isTaskRunning || isCrawlingAli, currentPage: currentCrawlingPage });
         return true;
@@ -127,44 +168,79 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                  
                  console.log(`[Crawl] Using tab: "${activeTab.title}" (${activeTab.url})`);
                  
-                 // Send initial status with tab info
-                 chrome.runtime.sendMessage({ 
-                     type: 'UPDATE_STATUS', 
-                     data: { 
-                         status: `Using tab: "${activeTab.title}"`, 
-                         isTaskRunning: true, 
-                         currentPage: 0 
-                     } 
-                 });
+                         // Save initial crawl state
+        await saveCrawlState({
+            isCrawling: true,
+            currentLink: '',
+            currentPage: 0,
+            totalLinks: links.length,
+            currentLinkIndex: 0,
+            tabTitle: activeTab.title
+        });
+        
+        // Send initial status with tab info
+        chrome.runtime.sendMessage({ 
+            type: 'UPDATE_STATUS', 
+            data: { 
+                status: `Using tab: "${activeTab.title}"`, 
+                isTaskRunning: true, 
+                currentPage: 0 
+            } 
+        });
                  
-                 // Process each link on the current tab
-                 for (let i = 0; i < links.length && isCrawlingAli; i++) {
-                     const link = links[i];
-                     currentLink = link;
-                     console.log(`[Crawl] Processing link ${i + 1}/${links.length}: ${link}`);
+                                 // Process each link on the current tab
+                for (let i = 0; i < links.length && isCrawlingAli; i++) {
+                    const link = links[i];
+                    currentLink = link;
+                    console.log(`[Crawl] Processing link ${i + 1}/${links.length}: ${link}, isCrawlingAli = ${isCrawlingAli}`);
+                    
+                    // Update crawl state
+                    await saveCrawlState({
+                        isCrawling: true,
+                        currentLink: currentLink,
+                        currentPage: 0,
+                        totalLinks: links.length,
+                        currentLinkIndex: i + 1,
+                        tabTitle: activeTab.title
+                    });
+                    
+                    chrome.runtime.sendMessage({ 
+                        type: 'UPDATE_STATUS', 
+                        data: { 
+                            linkUrl: currentLink,
+                            status: `Processing link ${i + 1}/${links.length}...`, 
+                            isTaskRunning: true, 
+                            currentPage: i + 1 
+                        } 
+                    });
                      
-                     chrome.runtime.sendMessage({ 
-                         type: 'UPDATE_STATUS', 
-                         data: { 
-                             linkUrl: currentLink,
-                             status: `Processing link ${i + 1}/${links.length}...`, 
-                             isTaskRunning: true, 
-                             currentPage: i + 1 
-                         } 
-                     });
+                                         // Load the link on the current tab
+                    await chrome.tabs.update(activeTab.id, { url: link });
+                    if (!isCrawlingAli) break; // Check after tab update
+                    
+                    // Wait for page to load
+                    await new Promise(resolve => setTimeout(resolve, 3000));
+                    if (!isCrawlingAli) break; // Check after page load wait
+                    
+                    // For store pages, refresh to ensure we start from page 1
+                    if (link.includes('/store/') && link.includes('/pages/all-items.html')) {
+                        console.log(`[Crawl] Refreshing store page to start from page 1: ${link}`);
+                        await chrome.tabs.reload(activeTab.id);
+                        if (!isCrawlingAli) break; // Check after reload
+                        
+                        // Wait for page to load after refresh
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                        if (!isCrawlingAli) break; // Check after refresh wait
+                    }
                      
-                     // Load the link on the current tab
-                     await chrome.tabs.update(activeTab.id, { url: link });
-                     
-                     // Wait for page to load
-                     await new Promise(resolve => setTimeout(resolve, 3000));
-                     
-                     // Get updated tab info after loading
-                     const updatedTab = await chrome.tabs.get(activeTab.id);
-                     console.log(`[Crawl] Loaded: "${updatedTab.title}"`);
-                     
-                     // Check for Captcha before crawling (signature will be empty initially)
-                     const hasCaptcha = await checkCaptchaAndSendError(activeTab.id, sheetId, currentLink, '');
+                                         // Get updated tab info after loading
+                    const updatedTab = await chrome.tabs.get(activeTab.id);
+                    if (!isCrawlingAli) break; // Check after tab info
+                    console.log(`[Crawl] Loaded: "${updatedTab.title}"`);
+                    
+                    // Check for Captcha before crawling (signature will be empty initially)
+                    const hasCaptcha = await checkCaptchaAndSendError(activeTab.id, sheetId, currentLink, '');
+                    if (!isCrawlingAli) break; // Check after captcha check
                      
                      if (hasCaptcha) {
                          console.log(`[Crawl] Skipping link due to Captcha: ${currentLink}`);
@@ -180,18 +256,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                          continue; // Skip to next link
                      }
                      
-                     // Crawl the current tab
-                     const crawlResult = await crawlSingleTab(activeTab.id, diskSerialNumber, i + 1, currentLink, sheetId);
-                     
-                     // If crawl was stopped due to Captcha, continue to next link
-                     if (crawlResult === false) {
-                         console.log(`[Crawl] Crawl stopped for link ${i + 1}, continuing to next link`);
-                     }
+                                         // Crawl the current tab
+                    const crawlResult = await crawlSingleTab(activeTab.id, diskSerialNumber, i + 1, currentLink, sheetId);
+                    if (!isCrawlingAli) break; // Check after crawl completion
                     
-                    // Small delay between links
-                    if (i < links.length - 1 && isCrawlingAli) {
-                        await new Promise(resolve => setTimeout(resolve, 1000));
+                    // If crawl was stopped due to Captcha, continue to next link
+                    if (crawlResult === false) {
+                        console.log(`[Crawl] Crawl stopped for link ${i + 1}, continuing to next link`);
                     }
+                   
+                   // Small delay between links
+                   if (i < links.length - 1 && isCrawlingAli) {
+                       await new Promise(resolve => setTimeout(resolve, 1000));
+                       if (!isCrawlingAli) break; // Check after delay
+                   }
                 }
                 
                 if (isCrawlingAli) {
@@ -208,6 +286,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 }
                 
                 isCrawlingAli = false;
+                clearCrawlState(); // Clear saved state when completed
                 sendResponse({ success: true });
                 
             } catch (error) {
@@ -223,6 +302,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                     } 
                 });
                 isCrawlingAli = false;
+                clearCrawlState(); // Clear saved state on error
                 sendResponse({ success: false, message: error.message });
             }
         })();
@@ -251,7 +331,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 let baseUrl = '';
                 let isFirstPage = true;
                 while (isCrawlingAli) {
-                    console.log(`[Crawl] Crawling page ${page}`);
+                    console.log(`[Crawl] Crawling page ${page}, isCrawlingAli = ${isCrawlingAli}`);
+                    
+                    // Update crawl state with current page
+                    await saveCrawlState({
+                        isCrawling: true,
+                        currentLink: 'Current Tab',
+                        currentPage: page,
+                        totalLinks: 1,
+                        currentLinkIndex: 1,
+                        tabTitle: 'Current Tab'
+                    });
+                    
                     chrome.runtime.sendMessage({ type: 'UPDATE_STATUS', data: { status: `Crawling page ${page}...`, isTaskRunning: true, currentPage: page } });
 
                     // Xác định signature trước khi kiểm tra API
@@ -260,6 +351,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
                         if (tab && tab.url && tab.url.includes('/store/')) {
                             isStore = true;
+                            
+                            // For store pages, refresh to ensure we start from page 1
+                            if (tab.url.includes('/pages/all-items.html')) {
+                                console.log(`[Crawl] Refreshing store page to start from page 1: ${tab.url}`);
+                                await chrome.tabs.reload(tab.id);
+                                if (!isCrawlingAli) break; // Check after reload
+                                
+                                // Wait for page to load after refresh
+                                await new Promise(resolve => setTimeout(resolve, 3000));
+                                if (!isCrawlingAli) break; // Check after refresh wait
+                            }
                         } else {
                             isStore = false;
                         }
@@ -940,9 +1042,11 @@ async function checkCaptchaAndSendError(tabId, sheetId, currentLink, signature) 
         
         // Wait a bit more for page to fully load
         await new Promise(resolve => setTimeout(resolve, 3000));
+        if (!isCrawlingAli) return false; // Check after page load wait
         
         // Check for Captcha immediately when starting crawl
         const hasCaptcha = await checkCaptchaAndSendError(tabId, linkSheetId, currentLink, '');
+        if (!isCrawlingAli) return false; // Check after captcha check
         
         if (hasCaptcha) {
             console.log(`[Crawl] Captcha detected at start of crawl, stopping immediately`);
@@ -968,7 +1072,17 @@ async function checkCaptchaAndSendError(tabId, sheetId, currentLink, signature) 
         let isFirstPage = true;
         
                  while (isCrawlingAli) {
-             console.log(`[Crawl] Link ${linkIndex}: Crawling page ${page}`);
+             console.log(`[Crawl] Link ${linkIndex}: Crawling page ${page}, isCrawlingAli = ${isCrawlingAli}`);
+             
+             // Update crawl state with current page
+             await saveCrawlState({
+                 isCrawling: true,
+                 currentLink: currentLink,
+                 currentPage: page,
+                 totalLinks: 1, // For single link crawling
+                 currentLinkIndex: linkIndex,
+                 tabTitle: 'Current Tab'
+             });
              
              // Check for Captcha before each page
              const hasCaptchaOnPage = await checkCaptchaAndSendError(tabId, linkSheetId, currentLink, signature || '');
@@ -1008,6 +1122,18 @@ async function checkCaptchaAndSendError(tabId, sheetId, currentLink, signature) 
                 if (urlResults && urlResults[0] && urlResults[0].result) {
                     const currentUrl = urlResults[0].result;
                     isStore = currentUrl.includes('/store/');
+                    
+                    // For store pages, refresh to ensure we start from page 1
+                    if (isStore && currentUrl.includes('/pages/all-items.html')) {
+                        console.log(`[Crawl] Refreshing store page to start from page 1: ${currentUrl}`);
+                        await chrome.tabs.reload(tabId);
+                        if (!isCrawlingAli) return false; // Check after reload
+                        
+                        // Wait for page to load after refresh
+                        await new Promise(resolve => setTimeout(resolve, 3000));
+                        if (!isCrawlingAli) return false; // Check after refresh wait
+                    }
+                    
                     if (!isStore) {
                         let url = new URL(currentUrl);
                         url.searchParams.delete('page');

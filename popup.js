@@ -65,11 +65,11 @@ function initializeExtension() {
     // Listen for messages from background script
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (message.type === 'UPDATE_STATUS') {
-            // Always preserve link URL if available
-            if (message.data.linkUrl) {
-                crawlStatus.textContent = `Crawling link: ${message.data.linkUrl}`;
-            } else if (message.data.status) {
+            // Only show status, not link URL
+            if (message.data.status) {
                 crawlStatus.textContent = message.data.status;
+            } else {
+                crawlStatus.textContent = 'Crawling in progress...';
             }
             
             if (message.data.pageStatus) {
@@ -101,26 +101,19 @@ function initializeExtension() {
             crawlStatus.textContent = 'Stopping...';
             crawlStatusDetail.textContent = '';
             try {
-                // Luôn kiểm tra trạng thái thực tế từ background
-                chrome.runtime.sendMessage({ type: 'GET_CURRENT_STATUS' }, async function(status) {
-                    if (status && status.isTaskRunning) {
-                        const response = await chrome.runtime.sendMessage({
-                            type: 'STOP_CRAWL_ALIEX_PRODUCTS'
-                        });
-                        if (response && response.success) {
-                            crawlStatus.textContent = 'Stopped by user';
-                            crawlStatusDetail.textContent = '';
-                            updateButtonState(false);
-                        } else {
-                            crawlStatus.textContent = 'Failed to stop task';
-                            crawlStatusDetail.textContent = '';
-                        }
-                    } else {
-                        crawlStatus.textContent = 'No crawling task is running.';
-                        crawlStatusDetail.textContent = '';
-                        updateButtonState(false);
-                    }
+                // Send stop message directly
+                const response = await chrome.runtime.sendMessage({
+                    type: 'STOP_CRAWL_ALIEX_PRODUCTS'
                 });
+                
+                if (response && response.success) {
+                    crawlStatus.textContent = 'Stopped by user';
+                    crawlStatusDetail.textContent = '';
+                    updateButtonState(false);
+                } else {
+                    crawlStatus.textContent = 'Failed to stop task';
+                    crawlStatusDetail.textContent = '';
+                }
             } catch (error) {
                 crawlStatus.textContent = 'Error stopping task: ' + error.message;
                 crawlStatusDetail.textContent = '';
@@ -205,11 +198,7 @@ document.addEventListener('DOMContentLoaded', function() {
         const crawlButton = document.getElementById('crawlButton');
         
         if (status && status.isTaskRunning) {
-            if (status.linkUrl) {
-                crawlStatus.textContent = `Crawling link: ${status.linkUrl}`;
-            } else {
-                crawlStatus.textContent = status.status || '';
-            }
+            crawlStatus.textContent = status.status || 'Crawling in progress...';
             
             if (status.pageStatus) {
                 crawlStatusDetail.textContent = status.pageStatus;
@@ -232,6 +221,31 @@ document.addEventListener('DOMContentLoaded', function() {
                 crawlButton.style.backgroundColor = '#4CAF50';
             }
             crawlButton.disabled = false;
+        }
+    });
+    
+    // Also check for saved crawl state
+    chrome.runtime.sendMessage({ type: 'GET_CRAWL_STATE' }, function(response) {
+        if (response && response.success && response.state && response.isCrawling) {
+            const crawlStatus = document.getElementById('crawlStatus');
+            const crawlStatusDetail = document.getElementById('crawlStatusDetail');
+            const crawlButton = document.getElementById('crawlButton');
+            
+            if (crawlStatus && crawlStatusDetail && crawlButton) {
+                // Display saved crawl state
+                crawlStatus.textContent = 'Crawling in progress...';
+                
+                if (response.state.currentPage > 0) {
+                    crawlStatusDetail.textContent = `Crawling page ${response.state.currentPage}...`;
+                } else {
+                    crawlStatusDetail.textContent = 'Loading...';
+                }
+                
+                // Set button to Stop state
+                crawlButton.textContent = 'Stop';
+                crawlButton.style.backgroundColor = '#f44336';
+                crawlButton.disabled = false;
+            }
         }
     });
     
