@@ -108,7 +108,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             sendResponse({ success: false, message: 'A crawling task is already running.' });
             return true;
         }
-        const { sheetId, diskSerialNumber } = message;
+        const { sheetId, diskSerialNumber, gettingKey } = message;
         if (!sheetId) {
             sendResponse({ success: false, message: 'Link Sheet ID must not be empty!' });
             chrome.runtime.sendMessage({ type: 'UPDATE_STATUS', data: { status: 'Link Sheet ID must not be empty!', isTaskRunning: false, currentPage: 1 } });
@@ -117,6 +117,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         if (!diskSerialNumber) {
             sendResponse({ success: false, message: 'Disk Serial Number must not be empty!' });
             chrome.runtime.sendMessage({ type: 'UPDATE_STATUS', data: { status: 'Disk Serial Number must not be empty!', isTaskRunning: false, currentPage: 1 } });
+            return true;
+        }
+        if (!gettingKey) {
+            sendResponse({ success: false, message: 'Getting Key must not be empty!' });
+            chrome.runtime.sendMessage({ type: 'UPDATE_STATUS', data: { status: 'Getting Key must not be empty!', isTaskRunning: false, currentPage: 1 } });
             return true;
         }
         
@@ -135,7 +140,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
-                        id: sheetId
+                        id: sheetId,
+                        gettingKey: gettingKey || ''
                     })
                 });
                 

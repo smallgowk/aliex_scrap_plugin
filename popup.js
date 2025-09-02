@@ -7,6 +7,7 @@ function initializeExtension() {
     const crawlStatusDetail = document.getElementById('crawlStatusDetail');
     const sheetIdInput = document.getElementById('sheetIdInput');
     const diskSerialInput = document.getElementById('diskSerialInput');
+    const gettingKeyInput = document.getElementById('gettingKeyInput');
 
     // Load saved values from localStorage
     if (sheetIdInput) {
@@ -28,6 +29,16 @@ function initializeExtension() {
         }
         diskSerialInput.addEventListener('input', function() {
             localStorage.setItem('diskSerialNumber', diskSerialInput.value);
+        });
+    }
+
+    if (gettingKeyInput) {
+        const savedGettingKey = localStorage.getItem('gettingKey');
+        if (savedGettingKey) {
+            gettingKeyInput.value = savedGettingKey;
+        }
+        gettingKeyInput.addEventListener('input', function() {
+            localStorage.setItem('gettingKey', gettingKeyInput.value);
         });
     }
 
@@ -126,6 +137,14 @@ function initializeExtension() {
             try {
                 const sheetId = sheetIdInput && sheetIdInput.value ? sheetIdInput.value.trim() : '';
                 const diskSerialNumber = diskSerialInput && diskSerialInput.value ? diskSerialInput.value.trim() : '';
+                const gettingKey = gettingKeyInput && gettingKeyInput.value ? gettingKeyInput.value.trim() : '';
+                
+                if (!gettingKey) {
+                    crawlStatus.textContent = 'Getting Key must not be empty!';
+                    crawlStatusDetail.textContent = '';
+                    updateButtonState(false);
+                    return;
+                }
                 
                 if (!sheetId) {
                     crawlStatus.textContent = 'Link Sheet ID must not be empty!';
@@ -167,7 +186,8 @@ function initializeExtension() {
                     const response = await chrome.runtime.sendMessage({
                         type: 'CRAWL_ALIEX_PRODUCTS_FROM_SHEET',
                         sheetId,
-                        diskSerialNumber
+                        diskSerialNumber,
+                        gettingKey
                     });
                     
                     if (response && response.success === false) {
