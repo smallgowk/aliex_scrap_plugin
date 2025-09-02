@@ -8,6 +8,9 @@ let lastTrackingMessage = null;
 let isCrawlingAli = false;
 let currentCrawlingPage = 1;
 
+const DOMAIN = 'https://iamhere.vn/';
+// const DOMAIN = 'http://localhost:8089/';
+
 // Listen for messages from popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.type === 'START_CRAWL') {
@@ -59,12 +62,177 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } else if (message.type === 'GET_CURRENT_STATUS') {
         sendResponse({ ...currentTrackingStatus, isTaskRunning: isTaskRunning || isCrawlingAli, currentPage: currentCrawlingPage });
         return true;
+    } else if (message.type === 'CRAWL_ALIEX_PRODUCTS_FROM_SHEET') {
+        if (isCrawlingAli) {
+            sendResponse({ success: false, message: 'A crawling task is already running.' });
+            return true;
+        }
+        const { sheetId, diskSerialNumber } = message;
+        if (!sheetId) {
+            sendResponse({ success: false, message: 'Link Sheet ID must not be empty!' });
+            chrome.runtime.sendMessage({ type: 'UPDATE_STATUS', data: { status: 'Link Sheet ID must not be empty!', isTaskRunning: false, currentPage: 1 } });
+            return true;
+        }
+        if (!diskSerialNumber) {
+            sendResponse({ success: false, message: 'Disk Serial Number must not be empty!' });
+            chrome.runtime.sendMessage({ type: 'UPDATE_STATUS', data: { status: 'Disk Serial Number must not be empty!', isTaskRunning: false, currentPage: 1 } });
+            return true;
+        }
+        
+        (async () => {
+            try {
+                isCrawlingAli = true;
+                currentCrawlingPage = 1;
+                let currentLink = '';
+                
+                // Call API to get list of links
+                chrome.runtime.sendMessage({ type: 'UPDATE_STATUS', data: { status: 'Fetching links from sheet...', isTaskRunning: true, currentPage: 0 } });
+                
+                const apiResponse = await fetch(`${DOMAIN}api/ggsheet/getCrawlLinks`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        id: sheetId
+                    })
+                });
+                
+                if (!apiResponse.ok) {
+                    throw new Error(`API call failed with status: ${apiResponse.status}`);
+                }
+                
+                const apiData = await apiResponse.json();
+                
+                if (apiData.httpStatus !== 'OK' || !apiData.data || !Array.isArray(apiData.data)) {
+                    throw new Error('Invalid API response format');
+                }
+                
+                const links = apiData.data;
+                console.log(`[Crawl] Found ${links.length} links to crawl`);
+                
+                if (links.length === 0) {
+                    chrome.runtime.sendMessage({ type: 'UPDATE_STATUS', data: { status: 'No links found in sheet', pageStatus: '', isTaskRunning: false, currentPage: 0 } });
+                    isCrawlingAli = false;
+                    sendResponse({ success: true });
+                    return;
+                }
+                
+                                 // Get the current active tab
+                 const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                 
+                 if (!activeTab) {
+                     throw new Error('No active tab found');
+                 }
+                 
+                 console.log(`[Crawl] Using tab: "${activeTab.title}" (${activeTab.url})`);
+                 
+                 // Send initial status with tab info
+                 chrome.runtime.sendMessage({ 
+                     type: 'UPDATE_STATUS', 
+                     data: { 
+                         status: `Using tab: "${activeTab.title}"`, 
+                         isTaskRunning: true, 
+                         currentPage: 0 
+                     } 
+                 });
+                 
+                 // Process each link on the current tab
+                 for (let i = 0; i < links.length && isCrawlingAli; i++) {
+                     const link = links[i];
+                     currentLink = link;
+                     console.log(`[Crawl] Processing link ${i + 1}/${links.length}: ${link}`);
+                     
+                     chrome.runtime.sendMessage({ 
+                         type: 'UPDATE_STATUS', 
+                         data: { 
+                             linkUrl: currentLink,
+                             status: `Processing link ${i + 1}/${links.length}...`, 
+                             isTaskRunning: true, 
+                             currentPage: i + 1 
+                         } 
+                     });
+                     
+                     // Load the link on the current tab
+                     await chrome.tabs.update(activeTab.id, { url: link });
+                     
+                     // Wait for page to load
+                     await new Promise(resolve => setTimeout(resolve, 3000));
+                     
+                     // Get updated tab info after loading
+                     const updatedTab = await chrome.tabs.get(activeTab.id);
+                     console.log(`[Crawl] Loaded: "${updatedTab.title}"`);
+                     
+                     // Check for Captcha before crawling (signature will be empty initially)
+                     const hasCaptcha = await checkCaptchaAndSendError(activeTab.id, sheetId, currentLink, '');
+                     
+                     if (hasCaptcha) {
+                         console.log(`[Crawl] Skipping link due to Captcha: ${currentLink}`);
+                         chrome.runtime.sendMessage({ 
+                             type: 'UPDATE_STATUS', 
+                             data: { 
+                                 linkUrl: currentLink,
+                                 status: `Captcha detected - skipping link ${i + 1}/${links.length}`, 
+                                 isTaskRunning: true, 
+                                 currentPage: i + 1 
+                             } 
+                         });
+                         continue; // Skip to next link
+                     }
+                     
+                     // Crawl the current tab
+                     const crawlResult = await crawlSingleTab(activeTab.id, diskSerialNumber, i + 1, currentLink, sheetId);
+                     
+                     // If crawl was stopped due to Captcha, continue to next link
+                     if (crawlResult === false) {
+                         console.log(`[Crawl] Crawl stopped for link ${i + 1}, continuing to next link`);
+                     }
+                    
+                    // Small delay between links
+                    if (i < links.length - 1 && isCrawlingAli) {
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+                    }
+                }
+                
+                if (isCrawlingAli) {
+                    chrome.runtime.sendMessage({ 
+                        type: 'UPDATE_STATUS', 
+                        data: { 
+                            linkUrl: currentLink,
+                            status: `Completed crawling all ${links.length} links`, 
+                            pageStatus: '',
+                            isTaskRunning: false, 
+                            currentPage: links.length 
+                        } 
+                    });
+                }
+                
+                isCrawlingAli = false;
+                sendResponse({ success: true });
+                
+            } catch (error) {
+                console.error('[Crawl] Error:', error);
+                chrome.runtime.sendMessage({ 
+                    type: 'UPDATE_STATUS', 
+                    data: { 
+                        linkUrl: currentLink,
+                        status: `Error: ${error.message}`, 
+                        pageStatus: '',
+                        isTaskRunning: false, 
+                        currentPage: 0 
+                    } 
+                });
+                isCrawlingAli = false;
+                sendResponse({ success: false, message: error.message });
+            }
+        })();
+        return true;
     } else if (message.type === 'CRAWL_ALIEX_PRODUCTS') {
         if (isCrawlingAli) {
             sendResponse({ success: false, message: 'A crawling task is already running.' });
             return true;
         }
-        const { diskSerialNumber, tabId } = message;
+        const { diskSerialNumber, tabId, sheetId } = message;
         if (!diskSerialNumber) {
             sendResponse({ success: false, message: 'Disk Serial Number must not be empty!' });
             chrome.runtime.sendMessage({ type: 'UPDATE_STATUS', data: { status: 'Disk Serial Number must not be empty!', isTaskRunning: false, currentPage: 1 } });
@@ -173,41 +341,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         tempSignature = sigRes && sigRes[0] && sigRes[0].result ? sigRes[0].result : null;
                         if (tempSignature && !signature) signature = tempSignature;
                     }
-
-                    // Kiểm tra API getAliexProducts trước khi crawl trang này
-                    // if (tempSignature && diskSerialNumber && page > 0) {
-                    //     try {
-                    //         const checkRes = await fetch('http://iamhere.vn:8089/api/ggsheet/getAliexProducts', {
-                    //             method: 'POST',
-                    //             headers: { 'Content-Type': 'application/json' },
-                    //             body: JSON.stringify({
-                    //                 diskSerialNumber: diskSerialNumber,
-                    //                 signature: tempSignature,
-                    //                 pageNumber: page
-                    //             })
-                    //         });
-                    //         if (checkRes.ok) {
-                    //             const checkData = await checkRes.json();
-                    //             if (checkData && Array.isArray(checkData.data) && checkData.data.length > 0) {
-                    //                 console.log(`[Crawl] Page ${page} đã có dữ liệu, gửi pushedData và skip sang trang tiếp theo.`);
-                    //                 await fetch('http://iamhere.vn:8089/api/v1/websocket/pushedData', {
-                    //                     method: 'POST',
-                    //                     headers: { 'Content-Type': 'application/json' },
-                    //                     body: JSON.stringify({
-                    //                         diskSerialNumber: diskSerialNumber,
-                    //                         signature: tempSignature,
-                    //                         pageNumber: page
-                    //                     })
-                    //                 });
-                    //                 page++;
-                    //                 currentCrawlingPage = page;
-                    //                 continue;
-                    //             }
-                    //         }
-                    //     } catch (err) {
-                    //         console.warn('[Crawl] Lỗi khi gọi getAliexProducts:', err);
-                    //     }
-                    // }
 
                     let pageToCrawl = page;
                     if (!isStore) {
@@ -429,29 +562,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         pageIndex = pageToCrawl;
                         if (searchTotalPage) totalPageValue = searchTotalPage;
                     }
-                    if (productIds.length === 0) {
-                        // Nếu không còn sản phẩm nào thì dừng
-                        break;
-                    }
-                    if (productIds.length && signature) {
+                    // Always call API even if no products found
+                    if (signature) {
+                        // Get current tab URL for linkCrawling
+                        const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                        const currentTabUrl = currentTab ? currentTab.url : '';
+                        
                         console.log('[pushAliexProducts] Payload:', {
                             signature, 
                             listProducts: productIds, 
                             diskSerialNumber: diskSerialNumber,
                             totalPage: totalPageValue,
-                            pageNumber: pageIndex
+                            pageNumber: pageIndex,
+                            linkSheetId: sheetId,
+                            linkSheetName: '', // Not available in single tab crawling
+                            linkCrawling: currentTabUrl
                         });
-                        const apiRes = await fetch('http://iamhere.vn:8089/api/ggsheet/pushAliexProducts', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ 
-                                signature, 
-                                listProducts: productIds, 
-                                diskSerialNumber: diskSerialNumber,
-                                totalPage: totalPageValue,
-                                pageNumber: pageIndex
-                            })
-                        });
+                                                 const apiRes = await fetch(`${DOMAIN}api/ggsheet/pushAliexProducts`, {
+                             method: 'POST',
+                             headers: { 'Content-Type': 'application/json' },
+                             body: JSON.stringify({ 
+                                 signature, 
+                                 listProducts: productIds, 
+                                 diskSerialNumber: diskSerialNumber,
+                                 totalPage: totalPageValue,
+                                 pageNumber: pageIndex,
+                                 linkSheetId: sheetId,
+                                 linkSheetName: '', // Not available in single tab crawling
+                                 linkCrawling: currentTabUrl
+                             })
+                         });
                         if (!isCrawlingAli) break;
                         if (!apiRes.ok) {
                             sendResponse({ success: false, message: `API request failed at page ${page}.` });
@@ -460,6 +600,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             return;
                         }
                         totalSent += productIds.length;
+                        
+                        // If no products found, stop crawling
+                        if (productIds.length === 0) {
+                            console.log(`[Crawl] No products found on page ${page}, stopping crawl`);
+                            break;
+                        }
                     }
                     allProductIds.push(...productIds);
                     let hasNext = false;
@@ -653,8 +799,8 @@ async function startCrawling(tabId) {
 }
 
 async function handleFetchTracking(message, sender, sendResponse) {
-    const BASE_API_URL = 'http://iamhere.vn:8089/api/ggsheet';
-    const { sheetId, sheetName, tabId } = message;
+    const BASE_API_URL = `${DOMAIN}api/ggsheet`;
+            const { sheetId, tabId } = message;
     try {
         currentTrackingStatus = { currentPage: 0, totalItems: 0, status: 'Fetching orderId list from Google Sheet...', isTaskRunning: true };
         chrome.runtime.sendMessage({ type: 'UPDATE_STATUS', data: currentTrackingStatus });
@@ -662,7 +808,7 @@ async function handleFetchTracking(message, sender, sendResponse) {
         const infoRes = await fetch(`${BASE_API_URL}/getInfo`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: sheetId, sheetName })
+            body: JSON.stringify({ id: sheetId })
         });
         if (!infoRes.ok) throw new Error('Error calling getInfo API');
         
@@ -711,7 +857,7 @@ async function handleFetchTracking(message, sender, sendResponse) {
             const updateRes = await fetch(`${BASE_API_URL}/update`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id: sheetId, sheetName, datamap })
+                body: JSON.stringify({ id: sheetId, datamap })
             });
             
             if (!updateRes.ok) {
@@ -741,4 +887,528 @@ function resetCrawlingState() {
     currentTabId = null;
     crawledItemIds.clear();
     pageCount = 0;
+}
+
+// Function to check for Captcha and send error API
+async function checkCaptchaAndSendError(tabId, sheetId, currentLink, signature) {
+    try {
+        const tab = await chrome.tabs.get(tabId);
+        const title = tab.title || '';
+        const url = tab.url || '';
+        
+        console.log(`[Crawl] Checking Captcha - Title: "${title}", URL: "${url}"`);
+        
+        if (title.toLowerCase().includes('captcha') || url.toLowerCase().includes('captcha')) {
+            console.log(`[Crawl] Captcha detected! Title: "${title}", URL: "${url}"`);
+            
+            // Send error API
+            const errorResponse = await fetch(`${DOMAIN}api/ggsheet/updateCrawlStatus`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    id: sheetId,
+                    link: currentLink,
+                    signature: signature || 'unknown',
+                    errors: 'Captcha'
+                })
+            });
+            
+            if (errorResponse.ok) {
+                console.log('[Crawl] Captcha error sent to API successfully');
+                const responseData = await errorResponse.json();
+                console.log('[Crawl] API Response:', responseData);
+            } else {
+                console.error('[Crawl] Failed to send Captcha error to API, status:', errorResponse.status);
+            }
+            
+            return true; // Captcha detected
+        }
+        
+        return false; // No Captcha
+    } catch (error) {
+        console.error('[Crawl] Error checking Captcha:', error);
+        return false;
+    }
+}
+
+ // Function to crawl a single tab (for sheet-based crawling)
+     async function crawlSingleTab(tabId, diskSerialNumber, linkIndex, currentLink, linkSheetId) {
+    try {
+        console.log(`[Crawl] Starting crawl for tab ${tabId}, link ${linkIndex}`);
+        
+        // Wait a bit more for page to fully load
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        // Check for Captcha immediately when starting crawl
+        const hasCaptcha = await checkCaptchaAndSendError(tabId, linkSheetId, currentLink, '');
+        
+        if (hasCaptcha) {
+            console.log(`[Crawl] Captcha detected at start of crawl, stopping immediately`);
+            chrome.runtime.sendMessage({ 
+                type: 'UPDATE_STATUS', 
+                data: { 
+                    linkUrl: currentLink,
+                    pageStatus: `Captcha detected - stopping crawl immediately`, 
+                    isTaskRunning: true, 
+                    currentPage: linkIndex 
+                } 
+            });
+            return false; // Stop crawling this link
+        }
+        
+        let allProductIds = [];
+        let signature = null;
+        let page = 1;
+        let isStore = false;
+        let totalSent = 0;
+        let crawlType = 'search';
+        let baseUrl = '';
+        let isFirstPage = true;
+        
+                 while (isCrawlingAli) {
+             console.log(`[Crawl] Link ${linkIndex}: Crawling page ${page}`);
+             
+             // Check for Captcha before each page
+             const hasCaptchaOnPage = await checkCaptchaAndSendError(tabId, linkSheetId, currentLink, signature || '');
+             
+             if (hasCaptchaOnPage) {
+                 console.log(`[Crawl] Captcha detected on page ${page}, stopping crawl for this link`);
+                 chrome.runtime.sendMessage({ 
+                     type: 'UPDATE_STATUS', 
+                     data: { 
+                         linkUrl: currentLink,
+                         pageStatus: `Captcha detected on page ${page} - stopping crawl`, 
+                         isTaskRunning: true, 
+                         currentPage: linkIndex 
+                     } 
+                 });
+                 return false; // Stop crawling this link
+             }
+             
+             chrome.runtime.sendMessage({ 
+                 type: 'UPDATE_STATUS', 
+                 data: { 
+                     linkUrl: currentLink,
+                     pageStatus: `Crawling page ${page}...`, 
+                     isTaskRunning: true, 
+                     currentPage: linkIndex 
+                 } 
+             });
+
+            // Xác định signature trước khi kiểm tra API
+            if (isFirstPage) {
+                // Xác định isStore dựa vào url hiện tại
+                const urlResults = await chrome.scripting.executeScript({
+                    target: { tabId },
+                    func: () => window.location.href
+                });
+                
+                if (urlResults && urlResults[0] && urlResults[0].result) {
+                    const currentUrl = urlResults[0].result;
+                    isStore = currentUrl.includes('/store/');
+                    if (!isStore) {
+                        let url = new URL(currentUrl);
+                        url.searchParams.delete('page');
+                        baseUrl = url.toString();
+                    }
+                }
+                isFirstPage = false;
+            }
+
+            // Lấy signature tạm thời để kiểm tra API (nếu chưa có signature thì skip kiểm tra)
+            let tempSignature = signature;
+            if (!tempSignature) {
+                // Lấy signature bằng cách inject script lấy nhanh signature (không cần lấy productIds)
+                const sigRes = await chrome.scripting.executeScript({
+                    target: { tabId },
+                    func: () => {
+                        // Lấy signature như logic cũ
+                        let signature = null;
+                        const storeA = Array.from(document.querySelectorAll('a[data-href*=".aliexpress."]')).find(a => {
+                            const m = a.getAttribute('data-href').match(/\/\/[^\/]*\.aliexpress\.[a-z0-9.-]+\/store\/(\d+)/);
+                            return m;
+                        });
+                        if (storeA) {
+                            const m = storeA.getAttribute('data-href').match(/\/\/[^\/]*\.aliexpress\.[a-z0-9.-]+\/store\/(\d+)/);
+                            const storeId = m[1];
+                            let text = storeA.innerText || storeA.textContent || '';
+                            text = text.trim().toLowerCase().replace(/\s+/g, '_');
+                            signature = `${storeId}_${text}`;
+                        } else {
+                            const input = document.querySelector('input.search--keyword--15P08Ji');
+                            if (input && input.value) {
+                                signature = input.value.trim().toLowerCase().replace(/\s+/g, '_');
+                            }
+                        }
+                        // Lấy country flag và language
+                        let countryFlag = '';
+                        let language = '';
+                        const shipTo = document.querySelector('.ship-to--menuItem--WdBDsYl');
+                        if (shipTo) {
+                            const flagSpan = shipTo.querySelector('span[class*="country-flag-"]');
+                            if (flagSpan) {
+                                const classList = Array.from(flagSpan.classList);
+                                const flagClass = classList.find(cls => cls.startsWith('country-flag-'));
+                                if (flagClass) {
+                                    const parts = flagClass.split(' ');
+                                    countryFlag = parts[parts.length - 1].replace('country-flag-', '').toUpperCase();
+                                    if (!countryFlag || countryFlag.length !== 2) {
+                                        const last = classList[classList.length - 1];
+                                        if (last.length === 2) countryFlag = last.toUpperCase();
+                                    }
+                                } else {
+                                    const last = classList[classList.length - 1];
+                                    if (last.length === 2) countryFlag = last.toUpperCase();
+                                }
+                            }
+                            const langSpan = shipTo.querySelector('.ship-to--small--1wG1oGl');
+                            if (langSpan) {
+                                const langText = langSpan.textContent || '';
+                                const match = langText.match(/\/([A-Z]{2})\//);
+                                if (match) {
+                                    language = match[1];
+                                } else {
+                                    const fallback = langText.match(/([A-Z]{2})\/?$/);
+                                    if (fallback) language = fallback[1];
+                                }
+                            }
+                        }
+                        if (signature && countryFlag && language && !signature.match(/_[A-Z]{2}_[A-Z]{2}$/)) {
+                            signature = `${signature}_${countryFlag}_${language}`;
+                        }
+                        return signature;
+                    }
+                });
+                tempSignature = sigRes && sigRes[0] && sigRes[0].result ? sigRes[0].result : null;
+                if (tempSignature && !signature) signature = tempSignature;
+            }
+
+            let pageToCrawl = page;
+            if (!isStore) {
+                // Tạo url mới với page param
+                let urlObj = new URL(baseUrl);
+                urlObj.searchParams.set('page', pageToCrawl);
+                await new Promise(resolve => {
+                    chrome.tabs.update(tabId, { url: urlObj.toString() }, () => resolve());
+                });
+                // Đợi trang load xong (polling)
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                // Scroll nhiều lần, dừng khi không còn item lazy-load
+                let tries = 0;
+                let maxTries = 30;
+                while (tries < maxTries) {
+                    console.log(`[Crawl] Scroll attempt ${tries + 1} for page ${page}`);
+                    await chrome.scripting.executeScript({
+                        target: { tabId },
+                        func: () => {
+                            // Scroll đến item cuối cùng có class hs_bu search-item-card-wrapper-gallery
+                            const items = document.querySelectorAll('div.lazy-load');
+                            if (items && items.length > 0) {
+                                items[items.length - 1].scrollIntoView({ behavior: 'smooth', block: 'end' });
+                            } 
+                        }
+                    });
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    // Kiểm tra còn item lazy-load không
+                    let lazyCountRes = await chrome.scripting.executeScript({
+                        target: { tabId },
+                        func: () => {
+                            const items = document.querySelectorAll('div.lazy-load');
+                            if (items) {
+                                return items.length;
+                            }
+                            return 0;
+                        }
+                    });
+                    const lazyCount = lazyCountRes && lazyCountRes[0] && lazyCountRes[0].result ? lazyCountRes[0].result : 0;
+                    console.log(`[Crawl] After scroll ${tries + 1}, lazy-load items left: ${lazyCount}`);
+                    if (lazyCount === 0) {
+                        // Sau khi hết lazy-load, tiếp tục scroll đến khi tìm thấy ul.comet-pagination (phân trang)
+                        let foundPaging = false;
+                        let pagingTries = 0;
+                        let maxPagingTries = 20;
+                        while (!foundPaging && pagingTries < maxPagingTries) {
+                            const pagingRes = await chrome.scripting.executeScript({
+                                target: { tabId },
+                                func: () => {
+                                    return !!document.querySelector('ul.comet-pagination');
+                                }
+                            });
+                            foundPaging = pagingRes;
+                            if (foundPaging) {
+                                console.log('[Crawl] Found paging element <ul class="comet-pagination">');
+                                break;
+                            }
+                            // Scroll xuống cuối trang thêm lần nữa
+                            await chrome.scripting.executeScript({
+                                target: { tabId },
+                                func: () => {
+                                    window.scrollTo(0, document.body.scrollHeight);
+                                }
+                            });
+                            await new Promise(resolve => setTimeout(resolve, 800));
+                            pagingTries++;
+                        }
+                        break;
+                    }
+                    tries++;
+                }
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+            // Thêm delay để đảm bảo trang load đầy đủ sau khi scroll
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
+            // Check for Captcha before extracting products
+            const hasCaptchaOnExtract = await checkCaptchaAndSendError(tabId, linkSheetId, currentLink, signature || '');
+            
+            if (hasCaptchaOnExtract) {
+                console.log(`[Crawl] Captcha detected on page ${page}, stopping crawl for this link`);
+                chrome.runtime.sendMessage({ 
+                    type: 'UPDATE_STATUS', 
+                    data: { 
+                        linkUrl: currentLink,
+                        pageStatus: `Captcha detected on page ${page} - stopping crawl`, 
+                        isTaskRunning: true, 
+                        currentPage: linkIndex 
+                    } 
+                });
+                break; // Stop crawling this link
+            }
+            
+            console.log(`[Crawl] Starting to extract product IDs for page ${page}`);
+            const results = await chrome.scripting.executeScript({
+                target: { tabId },
+                func: () => {
+                    let productIds = [];
+                    if (window.location.href.includes('/store/')) {
+                        // STORE: lấy toàn bộ thẻ a trên trang
+                        const anchors = Array.from(document.querySelectorAll('a[href]'));
+                        const regex = /\/\/[^\/]*\.aliexpress\.[a-z0-9.-]+\/item\/(\d+)\.html/;
+                        const ids = anchors.map(a => {
+                            const m = a.getAttribute('href').match(regex);
+                            return m ? m[1] : null;
+                        }).filter(Boolean);
+                        productIds = Array.from(new Set(ids));
+                    } else {
+                        // SEARCH: chỉ lấy trong #card-list
+                        const cardList = document.querySelector('div[data-spm="main"]#card-list');
+                        if (cardList) {
+                            console.log(`[cardList] found!`);
+                            const anchors = Array.from(cardList.querySelectorAll('a[href]'));
+                            console.log(`[Link found] ${anchors.length}!`);
+                            const regex = /\/\/[^\/]*\.aliexpress\.[a-z0-9.-]+\/item\/(\d+)\.html/;
+                            const ids = anchors.map(a => {
+                                const m = a.getAttribute('href').match(regex);
+                                return m ? m[1] : null;
+                            }).filter(Boolean);
+                            console.log(`[ID found] ${ids.length}!`);
+                            productIds = Array.from(new Set(ids));
+                        } else {
+                            console.log(`[cardList] not found!`);
+                        }
+                    }
+                    // Get signature
+                    let signature = null;
+                    // 1. Try to find any aliexpress store link
+                    const storeA = Array.from(document.querySelectorAll('a[data-href*=".aliexpress."]')).find(a => {
+                        const m = a.getAttribute('data-href').match(/\/\/[^\/]*\.aliexpress\.[a-z0-9.-]+\/store\/(\d+)/);
+                        return m;
+                    });
+                    if (storeA) {
+                        const m = storeA.getAttribute('data-href').match(/\/\/[^\/]*\.aliexpress\.[a-z0-9.-]+\/store\/(\d+)/);
+                        const storeId = m[1];
+                        let text = storeA.innerText || storeA.textContent || '';
+                        text = text.trim().toLowerCase().replace(/\s+/g, '_');
+                        signature = `${storeId}_${text}`;
+                    } else {
+                        // 2. Try to find input.search--keyword--15P08Ji
+                        const input = document.querySelector('input.search--keyword--15P08Ji');
+                        if (input && input.value) {
+                            signature = input.value.trim().toLowerCase().replace(/\s+/g, '_');
+                        }
+                    }
+                    // Lấy country flag và language
+                    let countryFlag = '';
+                    let language = '';
+                    const shipTo = document.querySelector('.ship-to--menuItem--WdBDsYl');
+                    if (shipTo) {
+                        const flagSpan = shipTo.querySelector('span[class*="country-flag-"]');
+                        if (flagSpan) {
+                            const classList = Array.from(flagSpan.classList);
+                            // Tìm class bắt đầu bằng 'country-flag-' và lấy phần sau cùng (thường là US)
+                            const flagClass = classList.find(cls => cls.startsWith('country-flag-'));
+                            if (flagClass) {
+                                const parts = flagClass.split(' ');
+                                countryFlag = parts[parts.length - 1].replace('country-flag-', '').toUpperCase();
+                                // Nếu vẫn chưa đúng, thử lấy phần tử cuối cùng của classList nếu nó là 2 ký tự
+                                if (!countryFlag || countryFlag.length !== 2) {
+                                    const last = classList[classList.length - 1];
+                                    if (last.length === 2) countryFlag = last.toUpperCase();
+                                }
+                            } else {
+                                // fallback lấy phần tử cuối cùng nếu là 2 ký tự
+                                const last = classList[classList.length - 1];
+                                if (last.length === 2) countryFlag = last.toUpperCase();
+                            }
+                        }
+                        const langSpan = shipTo.querySelector('.ship-to--small--1wG1oGl');
+                        if (langSpan) {
+                            const langText = langSpan.textContent || '';
+                            // Lấy 2 ký tự in hoa cuối cùng trước dấu /
+                            const match = langText.match(/\/([A-Z]{2})\//);
+                            if (match) {
+                                language = match[1];
+                            } else {
+                                // fallback: lấy 2 ký tự in hoa cuối cùng
+                                const fallback = langText.match(/([A-Z]{2})\/?$/);
+                                if (fallback) language = fallback[1];
+                            }
+                        }
+                    }
+                    // Lấy currentPage và totalpage nếu là store
+                    let storePageInfo = { currentPage: null, totalpage: null };
+                    const storePageDiv = document.querySelector('div[currentpage][totalpage]');
+                    if (storePageDiv) {
+                        storePageInfo.currentPage = storePageDiv.getAttribute('currentpage');
+                        storePageInfo.totalpage = storePageDiv.getAttribute('totalpage');
+                    }
+                    // Lấy totalPage cho search (không phải store)
+                    let searchTotalPage = null;
+                    if (!window.location.href.includes('/store/')) {
+                        const quickJumper = document.querySelector('.comet-pagination-options-quick-jumper');
+                        if (quickJumper) {
+                            // Tìm text node chứa "/60" hoặc tương tự
+                            const textNodes = Array.from(quickJumper.childNodes).filter(n => n.nodeType === Node.TEXT_NODE);
+                            let totalPageText = null;
+                            for (const node of textNodes) {
+                                const match = node.textContent.match(/\/(\d+)/);
+                                if (match) {
+                                    totalPageText = match[1];
+                                    break;
+                                }
+                            }
+                            if (!totalPageText) {
+                                // fallback: lấy từ innerText
+                                const m = quickJumper.innerText.match(/\/(\d+)/);
+                                if (m) totalPageText = m[1];
+                            }
+                            if (totalPageText) searchTotalPage = totalPageText;
+                        }
+                    }
+                    return { productIds, signature, isStore: !!storeA, countryFlag, language, storePageInfo, searchTotalPage };
+                }
+            });
+            if (!isCrawlingAli) break;
+            let { productIds, signature: sig, isStore: storeFlag, countryFlag, language, storePageInfo, searchTotalPage } = results && results[0] && results[0].result ? results[0].result : { productIds: [], signature: null, isStore: false, countryFlag: '', language: '', storePageInfo: { currentPage: null, totalpage: null }, searchTotalPage: null };
+            // Chỉ ghép countryFlag và language vào signature một lần duy nhất
+            if (!signature && sig) signature = sig;
+            if (signature && countryFlag && language && !signature.match(/_[A-Z]{2}_[A-Z]{2}$/)) {
+                signature = `${signature}_${countryFlag}_${language}`;
+            }
+            isStore = storeFlag;
+            crawlType = isStore ? 'store' : 'search';
+            // Xác định pageIndex để update Firebase
+            let pageIndex = page;
+            let totalPageValue = undefined;
+            if (isStore && storePageInfo && storePageInfo.currentPage) {
+                pageIndex = storePageInfo.currentPage;
+                if (storePageInfo.totalpage) totalPageValue = storePageInfo.totalpage;
+            } else if (!isStore) {
+                pageIndex = pageToCrawl;
+                if (searchTotalPage) totalPageValue = searchTotalPage;
+            }
+            // Always call API even if no products found
+            if (signature) {
+                console.log('[pushAliexProducts] Payload:', {
+                    signature, 
+                    listProducts: productIds, 
+                    diskSerialNumber: diskSerialNumber,
+                    totalPage: totalPageValue,
+                    pageNumber: pageIndex
+                });
+                                                                   const apiRes = await fetch(`${DOMAIN}api/ggsheet/pushAliexProducts`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ 
+                          signature, 
+                          listProducts: productIds, 
+                          diskSerialNumber: diskSerialNumber,
+                          totalPage: totalPageValue,
+                          pageNumber: pageIndex,
+                          linkSheetId: linkSheetId,
+                          linkCrawling: currentLink
+                      })
+                  });
+                if (!isCrawlingAli) break;
+                if (!apiRes.ok) {
+                    console.error(`[Crawl] API request failed at page ${page} for link ${linkIndex}`);
+                    break;
+                }
+                totalSent += productIds.length;
+                
+                // If no products found, stop crawling
+                if (productIds.length === 0) {
+                    console.log(`[Crawl] No products found on page ${page}, stopping crawl for this link`);
+                    break;
+                }
+            }
+            allProductIds.push(...productIds);
+            let hasNext = false;
+            if (isStore) {
+                const nextRes = await chrome.scripting.executeScript({
+                    target: { tabId },
+                    func: () => {
+                        const nextDiv = Array.from(document.querySelectorAll('div[style*="background-image"]')).find(div => {
+                            return div.style.backgroundImage.includes('ae01.alicdn.com/kf/Sfbc266a67ab34b2dbfacf350a02d2ee50/120x120.png');
+                        });
+                        if (nextDiv && nextDiv.offsetParent !== null) {
+                            nextDiv.click();
+                            return true;
+                        }
+                        return false;
+                    }
+                });
+                hasNext = nextRes && nextRes[0] && nextRes[0].result;
+            } else {
+                // Kiểm tra xem có trang tiếp theo không dựa trên cấu trúc phân trang mới
+                const nextPageRes = await chrome.scripting.executeScript({
+                    target: { tabId },
+                    func: () => {
+                        // Kiểm tra xem có nút "next" không bị disabled
+                        const nextButton = document.querySelector('.comet-pagination-next:not(.comet-pagination-disabled)');
+                        if (nextButton) {
+                            return true;
+                        }
+                        // Kiểm tra xem có trang tiếp theo trong danh sách không
+                        const currentPage = document.querySelector('.comet-pagination-item-active');
+                        if (currentPage) {
+                            const currentPageNumber = parseInt(currentPage.textContent);
+                            const allPageItems = Array.from(document.querySelectorAll('.comet-pagination-item'));
+                            const maxPageNumber = Math.max(...allPageItems.map(item => {
+                                const num = parseInt(item.textContent);
+                                return isNaN(num) ? 0 : num;
+                            }));
+                            return currentPageNumber < maxPageNumber;
+                        }
+                        return false;
+                    }
+                });
+                hasNext = nextPageRes && nextPageRes[0] && nextPageRes[0].result;
+            }
+            if (!hasNext) break;
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            if (!isCrawlingAli) break;
+            page++;
+        }
+        
+        allProductIds = Array.from(new Set(allProductIds));
+        console.log(`[Crawl] Completed crawling link ${linkIndex}, found ${allProductIds.length} products, sent ${totalSent} products`);
+        return true;
+        
+    } catch (error) {
+        console.error(`[Crawl] Error crawling tab ${tabId}:`, error);
+        return false;
+    }
 }

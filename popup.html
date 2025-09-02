@@ -8,12 +8,17 @@
     <div class="container">
         <h1>Aliex Scrapper Plugin</h1>
         <div class="url-input">
-            <label for="sheetNameInput">Disk Serial Number:</label>
-            <input type="text" id="sheetNameInput" placeholder="" value="" />
+            <label for="sheetIdInput">Link Sheet ID:</label>
+            <input type="text" id="sheetIdInput" placeholder="Enter Sheet ID" value="" />
+            
+            <label for="diskSerialInput">Disk Serial Number:</label>
+            <input type="text" id="diskSerialInput" placeholder="Enter Disk Serial Number" value="" />
+            
             <div style="display: flex; flex-direction: column; align-items: flex-start; gap: 8px;">
                 <button id="crawlButton" type="button">Start</button>
             </div>
             <div id="crawlStatus" class="status-message"></div>
+            <div id="crawlStatusDetail" class="status-message"></div>
         </div>
     </div>
     <script src="popup.js"></script>
