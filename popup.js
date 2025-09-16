@@ -162,41 +162,20 @@ function initializeExtension() {
                     return;
                 }
                 
-                // Get current active tab for single tab crawling
-                const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+                // Always use sheet-based crawling
+                const response = await chrome.runtime.sendMessage({
+                    type: 'CRAWL_ALIEX_PRODUCTS_FROM_SHEET',
+                    sheetId,
+                    diskSerialNumber,
+                    gettingKey
+                });
                 
-                if (activeTab && activeTab.url && activeTab.url.includes('aliexpress.com')) {
-                    // Single tab crawling - crawl current tab
-                    const response = await chrome.runtime.sendMessage({
-                        type: 'CRAWL_ALIEX_PRODUCTS',
-                        tabId: activeTab.id,
-                        sheetId,
-                        diskSerialNumber
-                    });
-                    
-                    if (response && response.success === false) {
-                        crawlStatus.textContent = response.message || 'Crawl failed';
-                        crawlStatusDetail.textContent = '';
-                        updateButtonState(false);
-                    } else {
-                        updateButtonState(true);
-                    }
+                if (response && response.success === false) {
+                    crawlStatus.textContent = response.message || 'Crawl failed';
+                    crawlStatusDetail.textContent = '';
+                    updateButtonState(false);
                 } else {
-                    // Sheet-based crawling - crawl links from sheet
-                    const response = await chrome.runtime.sendMessage({
-                        type: 'CRAWL_ALIEX_PRODUCTS_FROM_SHEET',
-                        sheetId,
-                        diskSerialNumber,
-                        gettingKey
-                    });
-                    
-                    if (response && response.success === false) {
-                        crawlStatus.textContent = response.message || 'Crawl failed';
-                        crawlStatusDetail.textContent = '';
-                        updateButtonState(false);
-                    } else {
-                        updateButtonState(true);
-                    }
+                    updateButtonState(true);
                 }
             } catch (error) {
                 crawlStatus.textContent = 'Error: ' + error.message;
