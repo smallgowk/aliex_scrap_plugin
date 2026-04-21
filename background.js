@@ -21,6 +21,75 @@ async function saveCrawlState(state) {
     }
 }
 
+async function waitForTabNavigation(tabId, expectedUrlPredicate, timeoutMs = 15000, intervalMs = 200) {
+    // Chờ một nhịp nhỏ để Chrome bắt đầu navigation
+    await new Promise(r => setTimeout(r, 300));
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        if (typeof isCrawlingAli !== 'undefined' && !isCrawlingAli) {
+            console.log('[Crawl] waitForTabNavigation aborted (isCrawlingAli=false)');
+            return false;
+        }
+        try {
+            const tab = await chrome.tabs.get(tabId);
+            const urlOk = expectedUrlPredicate ? !!expectedUrlPredicate(tab && tab.url ? tab.url : '') : true;
+            if (tab && tab.status === 'complete' && urlOk) {
+                return true;
+            }
+        } catch (err) {
+            // ignore; tab may be transitioning
+        }
+        await new Promise(resolve => setTimeout(resolve, intervalMs));
+    }
+    console.warn('[Crawl] waitForTabNavigation timeout');
+    return false;
+}
+
+async function waitForSearchReady(tabId, timeoutMs = 10000, intervalMs = 500) {
+    const start = Date.now();
+    let lastState = { ready: false, hasProducts: false, hasLazy: false, isEmpty: false };
+    while (Date.now() - start < timeoutMs) {
+        if (typeof isCrawlingAli !== 'undefined' && !isCrawlingAli) {
+            console.log('[Crawl] waitForSearchReady aborted (isCrawlingAli=false)');
+            return lastState;
+        }
+        try {
+            const res = await chrome.scripting.executeScript({
+                target: { tabId },
+                func: () => {
+                    const productRegex = /\/\/[^\/]*\.aliexpress\.[a-z0-9.-]+\/item\/(\d+)\.html/;
+                    const cardList = document.querySelector('div[data-spm="main"]#card-list');
+                    let hasProducts = false;
+                    if (cardList) {
+                        const anchors = cardList.querySelectorAll('a[href]');
+                        for (const a of anchors) {
+                            const href = a.getAttribute('href') || '';
+                            if (productRegex.test(href)) {
+                                hasProducts = true;
+                                break;
+                            }
+                        }
+                    }
+                    const hasLazy = !!document.querySelector('div.lazy-load');
+                    const bodyText = (document.body && document.body.innerText) || '';
+                    const isEmpty = /did not match any products/i.test(bodyText);
+                    return { hasProducts, hasLazy, isEmpty };
+                }
+            });
+            const r = res && res[0] && res[0].result;
+            if (r) {
+                lastState = { ready: !!(r.hasProducts || r.hasLazy || r.isEmpty), hasProducts: !!r.hasProducts, hasLazy: !!r.hasLazy, isEmpty: !!r.isEmpty };
+                if (lastState.ready) return lastState;
+            }
+        } catch (err) {
+            console.warn('[Crawl] waitForSearchReady executeScript error:', err && err.message);
+        }
+        await new Promise(resolve => setTimeout(resolve, intervalMs));
+    }
+    console.log('[Crawl] waitForSearchReady timeout:', lastState);
+    return lastState;
+}
+
 async function loadCrawlState() {
     try {
         const result = await chrome.storage.local.get(['crawlState']);
@@ -458,8 +527,45 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         await new Promise(resolve => {
                             chrome.tabs.update(tabId, { url: urlObj.toString() }, () => resolve());
                         });
-                        // Đợi trang load xong (polling)
-                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        if (!isCrawlingAli) break;
+
+                        // Chờ tab thực sự navigate xong (status=complete + URL khớp page mới) trước khi đọc DOM
+                        const navOk = await waitForTabNavigation(tabId, (url) => {
+                            try {
+                                const u = new URL(url);
+                                return u.searchParams.get('page') === String(pageToCrawl);
+                            } catch (e) {
+                                return false;
+                            }
+                        });
+                        console.log(`[Crawl] Page ${page} navigation complete: ${navOk}`);
+                        if (!isCrawlingAli) break;
+
+                        // Đợi trang sẵn sàng: có product trong #card-list, có div.lazy-load, hoặc detect empty state
+                        let readyState = await waitForSearchReady(tabId);
+                        console.log(`[Crawl] Page ${page} initial readyState:`, readyState);
+                        if (!isCrawlingAli) break;
+
+                        // Nếu trang trống/lỗi (không products và không lazy-load) → refresh tối đa 2 lần trước khi scroll
+                        let pageRefreshAttempts = 0;
+                        const maxPageRefreshAttempts = 2;
+                        while (!readyState.hasProducts && !readyState.hasLazy && pageRefreshAttempts < maxPageRefreshAttempts) {
+                            pageRefreshAttempts++;
+                            console.log(`[Crawl] Empty/error state on page ${page}. Refreshing (${pageRefreshAttempts}/${maxPageRefreshAttempts})...`);
+                            await chrome.tabs.reload(tabId);
+                            if (!isCrawlingAli) break;
+                            await waitForTabNavigation(tabId, null);
+                            if (!isCrawlingAli) break;
+                            readyState = await waitForSearchReady(tabId);
+                            console.log(`[Crawl] Page ${page} readyState after refresh ${pageRefreshAttempts}:`, readyState);
+                            if (!isCrawlingAli) break;
+                        }
+                        if (!isCrawlingAli) break;
+
+                        if (!readyState.hasProducts && !readyState.hasLazy) {
+                            console.warn(`[Crawl] Page ${page} still empty after ${maxPageRefreshAttempts} refresh attempts. Continuing with normal flow.`);
+                        }
+
                         // Scroll nhiều lần, dừng khi không còn item lazy-load
                         let tries = 0;
                         let maxTries = 30;
@@ -468,26 +574,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                             await chrome.scripting.executeScript({
                                 target: { tabId },
                                 func: () => {
-                                    // Scroll đến item cuối cùng có class hs_bu search-item-card-wrapper-gallery
                                     const items = document.querySelectorAll('div.lazy-load');
                                     if (items && items.length > 0) {
                                         items[items.length - 1].scrollIntoView({ behavior: 'smooth', block: 'end' });
-                                    } 
-                                    // else {
-                                    //     window.scrollTo(0, document.body.scrollHeight);
-                                    // }
+                                    }
                                 }
                             });
                             await new Promise(resolve => setTimeout(resolve, 1000));
-                            // Kiểm tra còn item lazy-load không
+                            if (!isCrawlingAli) break;
                             let lazyCountRes = await chrome.scripting.executeScript({
                                 target: { tabId },
                                 func: () => {
                                     const items = document.querySelectorAll('div.lazy-load');
-                                    if (items) {
-                                        return items.length;
-                                    }
-                                    return 0;
+                                    return items ? items.length : 0;
                                 }
                             });
                             const lazyCount = lazyCountRes && lazyCountRes[0] && lazyCountRes[0].result ? lazyCountRes[0].result : 0;
@@ -498,14 +597,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                                 let pagingTries = 0;
                                 let maxPagingTries = 20;
                                 while (!foundPaging && pagingTries < maxPagingTries) {
+                                    if (!isCrawlingAli) break;
                                     const pagingRes = await chrome.scripting.executeScript({
                                         target: { tabId },
                                         func: () => {
                                             return !!document.querySelector('ul.comet-pagination');
                                         }
                                     });
-                                    // foundPaging = pagingRes && pagingRes[0] && pagingRes[0].result;
-                                    foundPaging = pagingRes;
+                                    foundPaging = pagingRes && pagingRes[0] && pagingRes[0].result;
                                     if (foundPaging) {
                                         console.log('[Crawl] Found paging element <ul class="comet-pagination">');
                                         break;
@@ -1225,8 +1324,45 @@ async function checkCaptchaAndSendError(tabId, sheetId, currentLink, signature) 
                 await new Promise(resolve => {
                     chrome.tabs.update(tabId, { url: urlObj.toString() }, () => resolve());
                 });
-                // Đợi trang load xong (polling)
-                await new Promise(resolve => setTimeout(resolve, 1000));
+                if (!isCrawlingAli) break;
+
+                // Chờ tab thực sự navigate xong (status=complete + URL khớp page mới) trước khi đọc DOM
+                const navOk = await waitForTabNavigation(tabId, (url) => {
+                    try {
+                        const u = new URL(url);
+                        return u.searchParams.get('page') === String(pageToCrawl);
+                    } catch (e) {
+                        return false;
+                    }
+                });
+                console.log(`[Crawl] Link ${linkIndex} page ${page} navigation complete: ${navOk}`);
+                if (!isCrawlingAli) break;
+
+                // Đợi trang sẵn sàng: có product trong #card-list, có div.lazy-load, hoặc detect empty state
+                let readyState = await waitForSearchReady(tabId);
+                console.log(`[Crawl] Link ${linkIndex} page ${page} initial readyState:`, readyState);
+                if (!isCrawlingAli) break;
+
+                // Nếu trang trống/lỗi → refresh tối đa 2 lần trước khi scroll
+                let pageRefreshAttempts = 0;
+                const maxPageRefreshAttempts = 2;
+                while (!readyState.hasProducts && !readyState.hasLazy && pageRefreshAttempts < maxPageRefreshAttempts) {
+                    pageRefreshAttempts++;
+                    console.log(`[Crawl] Link ${linkIndex} empty/error state on page ${page}. Refreshing (${pageRefreshAttempts}/${maxPageRefreshAttempts})...`);
+                    await chrome.tabs.reload(tabId);
+                    if (!isCrawlingAli) break;
+                    await waitForTabNavigation(tabId, null);
+                    if (!isCrawlingAli) break;
+                    readyState = await waitForSearchReady(tabId);
+                    console.log(`[Crawl] Link ${linkIndex} page ${page} readyState after refresh ${pageRefreshAttempts}:`, readyState);
+                    if (!isCrawlingAli) break;
+                }
+                if (!isCrawlingAli) break;
+
+                if (!readyState.hasProducts && !readyState.hasLazy) {
+                    console.warn(`[Crawl] Link ${linkIndex} page ${page} still empty after ${maxPageRefreshAttempts} refresh attempts. Continuing with normal flow.`);
+                }
+
                 // Scroll nhiều lần, dừng khi không còn item lazy-load
                 let tries = 0;
                 let maxTries = 30;
@@ -1235,23 +1371,19 @@ async function checkCaptchaAndSendError(tabId, sheetId, currentLink, signature) 
                     await chrome.scripting.executeScript({
                         target: { tabId },
                         func: () => {
-                            // Scroll đến item cuối cùng có class hs_bu search-item-card-wrapper-gallery
                             const items = document.querySelectorAll('div.lazy-load');
                             if (items && items.length > 0) {
                                 items[items.length - 1].scrollIntoView({ behavior: 'smooth', block: 'end' });
-                            } 
+                            }
                         }
                     });
                     await new Promise(resolve => setTimeout(resolve, 1000));
-                    // Kiểm tra còn item lazy-load không
+                    if (!isCrawlingAli) break;
                     let lazyCountRes = await chrome.scripting.executeScript({
                         target: { tabId },
                         func: () => {
                             const items = document.querySelectorAll('div.lazy-load');
-                            if (items) {
-                                return items.length;
-                            }
-                            return 0;
+                            return items ? items.length : 0;
                         }
                     });
                     const lazyCount = lazyCountRes && lazyCountRes[0] && lazyCountRes[0].result ? lazyCountRes[0].result : 0;
@@ -1262,13 +1394,14 @@ async function checkCaptchaAndSendError(tabId, sheetId, currentLink, signature) 
                         let pagingTries = 0;
                         let maxPagingTries = 20;
                         while (!foundPaging && pagingTries < maxPagingTries) {
+                            if (!isCrawlingAli) break;
                             const pagingRes = await chrome.scripting.executeScript({
                                 target: { tabId },
                                 func: () => {
                                     return !!document.querySelector('ul.comet-pagination');
                                 }
                             });
-                            foundPaging = pagingRes;
+                            foundPaging = pagingRes && pagingRes[0] && pagingRes[0].result;
                             if (foundPaging) {
                                 console.log('[Crawl] Found paging element <ul class="comet-pagination">');
                                 break;
